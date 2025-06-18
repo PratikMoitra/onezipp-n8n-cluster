@@ -228,3 +228,4 @@ This script is provided as-is under the MIT License. The n8n platform and its co
 ---
 
 **Note**: This script is designed for production use but should be reviewed and tested in your specific environment before deploying critical workloads.
+# onezipp-n8n-cluster
