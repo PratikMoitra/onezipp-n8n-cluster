@@ -1,0 +1,72 @@
+# Environment files
+.env
+.env.local
+.env.production
+*.env
+
+# Configuration files with secrets
+config-summary.txt
+*-credentials.txt
+*-passwords.txt
+
+# Docker volumes
+postgres_storage/
+redis_storage/
+ollama_storage/
+qdrant_storage/
+n8n_storage/
+caddy_data/
+caddy_config/
+
+# Logs
+*.log
+logs/
+docker-logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# SSL certificates
+*.pem
+*.crt
+*.key
+certificates/
+
+# Node modules
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.Python
+
+# Test files
+test/
+tests/
+*.test
+
+# Archives
+*.zip
+*.tar.gz
+*.tar
+*.gz

@@ -1,0 +1,175 @@
+# Custom Docker Compose Configuration Examples
+# This file shows how to customize the Onezipp N8N Cluster setup
+
+version: '3.8'
+
+# Example 1: Adding More Workers
+# Uncomment to add 2 additional workers (total of 6)
+services:
+  n8n-worker-5:
+    extends:
+      file: ../docker-compose.yml
+      service: n8n-worker-1
+    container_name: n8n-worker-5
+    hostname: n8n-worker-5
+
+  n8n-worker-6:
+    extends:
+      file: ../docker-compose.yml
+      service: n8n-worker-1
+    container_name: n8n-worker-6
+    hostname: n8n-worker-6
+
+# Example 2: Adding Resource Limits
+# Uncomment to limit resource usage per container
+#services:
+#  n8n-worker-1:
+#    deploy:
+#      resources:
+#        limits:
+#          cpus: '1.0'
+#          memory: 1G
+#        reservations:
+#          cpus: '0.5'
+#          memory: 512M
+
+# Example 3: Custom Redis Configuration
+# Uncomment for Redis with persistence and custom config
+#services:
+#  redis:
+#    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes --appendfilename "n8n-queue.aof"
+#    volumes:
+#      - redis_storage:/data
+#      - ./redis.conf:/usr/local/etc/redis/redis.conf
+
+# Example 4: PostgreSQL with Custom Settings
+# Uncomment for PostgreSQL with performance tuning
+#services:
+#  postgres:
+#    environment:
+#      - POSTGRES_USER=${POSTGRES_USER}
+#      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+#      - POSTGRES_DB=${POSTGRES_DB}
+#      - POSTGRES_INITDB_ARGS=--encoding=UTF8
+#    command: 
+#      - postgres
+#      - -c
+#      - max_connections=200
+#      - -c
+#      - shared_buffers=256MB
+#      - -c
+#      - effective_cache_size=1GB
+#      - -c
+#      - maintenance_work_mem=64MB
+
+# Example 5: Additional Webhook Processors
+# Uncomment to add 2 more webhook processors (total of 6)
+#services:
+#  n8n-webhook-5:
+#    extends:
+#      file: ../docker-compose.yml
+#      service: n8n-webhook-1
+#    container_name: n8n-webhook-5
+#    hostname: n8n-webhook-5
+#
+#  n8n-webhook-6:
+#    extends:
+#      file: ../docker-compose.yml
+#      service: n8n-webhook-1
+#    container_name: n8n-webhook-6
+#    hostname: n8n-webhook-6
+
+# Example 6: Custom Ollama Models
+# Uncomment to pre-load additional AI models
+#services:
+#  ollama-pull-extra:
+#    image: ollama/ollama:latest
+#    networks: ['n8n-network']
+#    container_name: ollama-pull-extra
+#    volumes:
+#      - ollama_storage:/root/.ollama
+#    entrypoint: /bin/sh
+#    command:
+#      - "-c"
+#      - |
+#        sleep 10
+#        ollama pull mistral
+#        ollama pull codellama
+#        ollama pull neural-chat
+#    depends_on:
+#      - ollama
+#    profiles: ['${GPU_PROFILE}', 'cpu']
+
+# Example 7: Monitoring Stack
+# Uncomment to add Prometheus and Grafana monitoring
+#services:
+#  prometheus:
+#    image: prom/prometheus:latest
+#    container_name: prometheus
+#    networks: ['n8n-network']
+#    ports:
+#      - "9090:9090"
+#    volumes:
+#      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+#      - prometheus_data:/prometheus
+#    command:
+#      - '--config.file=/etc/prometheus/prometheus.yml'
+#      - '--storage.tsdb.path=/prometheus'
+#
+#  grafana:
+#    image: grafana/grafana:latest
+#    container_name: grafana
+#    networks: ['n8n-network']
+#    ports:
+#      - "3000:3000"
+#    environment:
+#      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+#    volumes:
+#      - grafana_data:/var/lib/grafana
+#
+#volumes:
+#  prometheus_data:
+#  grafana_data:
+
+# Example 8: Backup Service
+# Uncomment to add automated backup service
+#services:
+#  backup:
+#    image: offen/docker-volume-backup:latest
+#    container_name: backup
+#    networks: ['n8n-network']
+#    environment:
+#      - BACKUP_CRON_EXPRESSION=0 2 * * *
+#      - BACKUP_FILENAME=n8n-backup-%Y-%m-%d.tar.gz
+#      - BACKUP_ARCHIVE=/archive
+#      - BACKUP_RETENTION_DAYS=7
+#    volumes:
+#      - n8n_storage:/backup/n8n_storage:ro
+#      - postgres_storage:/backup/postgres_storage:ro
+#      - ./backups:/archive
+
+# Example 9: Custom Network Configuration
+# Uncomment for custom network settings
+#networks:
+#  n8n-network:
+#    driver: bridge
+#    ipam:
+#      config:
+#        - subnet: 172.20.0.0/16
+#          gateway: 172.20.0.1
+
+# Example 10: Development Mode
+# Uncomment for development with hot-reload
+#services:
+#  n8n-dev:
+#    extends:
+#      file: ../docker-compose.yml
+#      service: n8n-main
+#    container_name: n8n-dev
+#    environment:
+#      - NODE_ENV=development
+#      - N8N_DEV_MODE=true
+#    volumes:
+#      - ./custom-nodes:/home/node/.n8n/nodes
+#    ports:
+#      - "5679:5678"
