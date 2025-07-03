@@ -135,6 +135,39 @@ fix_gpu_config() {
     fi
 }
 
+# Function to fix deprecated webhook URL variables
+fix_webhook_urls() {
+    print_message $YELLOW "🔧 Fixing deprecated webhook URL variables..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Check if .env has deprecated variables
+    if grep -q "WEBHOOK_URL=\|N8N_WEBHOOK_URL=\|N8N_WEBHOOK_TUNNEL_URL=" .env; then
+        print_message $YELLOW "Removing deprecated webhook URL variables from .env..."
+        
+        # Remove deprecated variables
+        sed -i '/^WEBHOOK_URL=/d' .env
+        sed -i '/^N8N_WEBHOOK_URL=/d' .env
+        sed -i '/^N8N_WEBHOOK_TUNNEL_URL=/d' .env
+        
+        push_fix_to_git "Removed deprecated webhook URL variables"
+    fi
+    
+    # Check if docker-compose.yml has deprecated variables
+    if grep -q "WEBHOOK_URL\|N8N_WEBHOOK_URL\|N8N_WEBHOOK_TUNNEL_URL" docker-compose.yml; then
+        print_message $YELLOW "Removing deprecated webhook URL variables from docker-compose.yml..."
+        
+        # Remove deprecated variable references
+        sed -i '/- WEBHOOK_URL=/d' docker-compose.yml
+        sed -i '/- N8N_WEBHOOK_URL=/d' docker-compose.yml
+        sed -i '/- N8N_WEBHOOK_TUNNEL_URL=/d' docker-compose.yml
+        
+        push_fix_to_git "Removed deprecated webhook URL variables from docker-compose"
+    fi
+    
+    return 0
+}
+
 # Function to fix container restart issues
 fix_container_restarts() {
     print_message $YELLOW "🔧 Checking for restarting containers..."
@@ -154,6 +187,9 @@ fix_container_restarts() {
             docker compose up -d
             sleep 30
         fi
+        
+        # Also fix webhook URLs
+        fix_webhook_urls
     fi
 }
 
@@ -170,6 +206,7 @@ handle_error() {
             print_message $YELLOW "Docker error detected. Attempting to fix..."
             fix_gpu_config
             fix_worker_commands
+            fix_webhook_urls
             ;;
         *)
             print_message $YELLOW "General error. Checking system state..."
@@ -437,14 +474,11 @@ N8N_CONCURRENCY=10
 N8N_RUNNERS_ENABLED=true
 
 # Webhook and URL Configuration
-WEBHOOK_URL=https://${DOMAIN}
-N8N_WEBHOOK_BASE_URL=https://${DOMAIN}
 N8N_EDITOR_BASE_URL=https://${DOMAIN}
+N8N_WEBHOOK_BASE_URL=https://${DOMAIN}
 N8N_HOST=${DOMAIN}
 N8N_PROTOCOL=https
 N8N_PORT=443
-N8N_WEBHOOK_URL=https://${DOMAIN}
-N8N_WEBHOOK_TUNNEL_URL=https://${DOMAIN}
 
 # GPU Profile
 GPU_PROFILE=${GPU_PROFILE}
@@ -537,14 +571,11 @@ x-n8n-base: &n8n-base
     - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
     - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
     - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
-    - N8N_WEBHOOK_BASE_URL=${N8N_WEBHOOK_BASE_URL}
-    - WEBHOOK_URL=${WEBHOOK_URL}
     - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
+    - N8N_WEBHOOK_BASE_URL=${N8N_WEBHOOK_BASE_URL}
     - N8N_HOST=${N8N_HOST}
     - N8N_PROTOCOL=${N8N_PROTOCOL}
     - N8N_PORT=${N8N_PORT}
-    - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
-    - N8N_WEBHOOK_TUNNEL_URL=${N8N_WEBHOOK_TUNNEL_URL}
     - OLLAMA_HOST=ollama:11434
   depends_on:
     postgres:
@@ -892,6 +923,7 @@ cd $INSTALL_DIR/self-hosted-ai-starter-kit
 if ! docker compose up -d; then
     print_message $RED "❌ Initial startup failed. Attempting fixes..."
     fix_gpu_config
+    fix_webhook_urls
     docker compose up -d
 fi
 
@@ -901,6 +933,7 @@ sleep 45
 
 # Check for issues and auto-fix
 fix_container_restarts
+fix_webhook_urls
 
 # Check service status
 print_section "Service Status Check"
@@ -937,6 +970,7 @@ GPU Profile: ${GPU_PROFILE}
 
 Service URLs:
 - N8N UI: https://${DOMAIN}
+- Webhook Base URL: https://${DOMAIN}
 - Ollama API: http://localhost:11434
 - Qdrant API: http://localhost:6333
 
@@ -952,6 +986,9 @@ if docker ps | grep -E "n8n-worker|n8n-webhook" | grep -q "Restarting"; then
     print_message $YELLOW "⚠️  Some services are still restarting. Running final fixes..."
     fix_container_restarts
 fi
+
+# Also check for deprecated webhook variables
+fix_webhook_urls
 
 # Push final state to git
 push_fix_to_git "Installation completed with all fixes applied"
@@ -992,6 +1029,7 @@ echo -e "   • Qdrant vector database"
 echo ""
 print_message $YELLOW "⚠️  Note: It may take a few minutes for SSL certificates to be issued."
 print_message $YELLOW "   If you can't access the site immediately, please wait 2-3 minutes."
+print_message $YELLOW "   Webhooks will automatically use: https://${DOMAIN}/webhook/..."
 echo ""
 print_message $GREEN "🎊 Thank you for using Onezipp N8N Cluster Script!"
 print_message $BLUE "   GitHub: https://github.com/PratikMoitra/onezipp-n8n-cluster"
