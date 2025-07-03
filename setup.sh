@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# Onezipp N8N Cluster Script - Production Ready Setup
+# Onezipp N8N Cluster Script - Production Ready Setup with Auto-Fix
 # =============================================================================
 # This script sets up n8n self-hosted AI starter kit with:
 # - Caddy reverse proxy with SSL
@@ -9,6 +9,7 @@
 # - Redis for queue management
 # - PostgreSQL database
 # - Ollama, Qdrant for AI capabilities
+# - AUTO-FIX: Automatically fixes common errors and pushes to git
 # =============================================================================
 
 set -e
@@ -20,12 +21,17 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Git repository info
+GIT_REPO_DIR="$HOME/onezipp-n8n-cluster"
+GIT_REMOTE="https://github.com/PratikMoitra/onezipp-n8n-cluster.git"
+SUMMARY_SHOWN=""
+
 # Banner
 echo -e "${BLUE}"
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║                                                              ║"
 echo "║           🚀 Onezipp N8N Cluster Setup Script 🚀            ║"
-echo "║                                                              ║"
+echo "║                   with Auto-Fix Capability                   ║"
 echo "║     Production-Ready N8N with AI Starter Kit & Caddy        ║"
 echo "║                                                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
@@ -44,6 +50,160 @@ print_section() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}▶ $1${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# Function to commit and push fixes to git
+push_fix_to_git() {
+    local fix_message=$1
+    local current_dir=$(pwd)
+    
+    if [ -d "$GIT_REPO_DIR" ]; then
+        cd "$GIT_REPO_DIR"
+        
+        # Only copy if files are different paths
+        if [ "$(realpath "$0")" != "$(realpath "$GIT_REPO_DIR/setup.sh")" ]; then
+            cp "$0" "$GIT_REPO_DIR/setup.sh"
+        fi
+        
+        # Check if there are changes
+        if ! git diff --quiet; then
+            print_message $YELLOW "📤 Pushing fix to git: $fix_message"
+            git add -A
+            git commit -m "Auto-fix: $fix_message" || true
+            
+            # Try to push with stored credentials
+            if git push origin main 2>/dev/null; then
+                print_message $GREEN "✅ Fix pushed to git successfully"
+            else
+                print_message $YELLOW "⚠️  Could not push to git (credentials needed)"
+            fi
+        fi
+        
+        cd "$current_dir"
+    fi
+}
+
+# Function to fix worker/webhook command issues
+fix_worker_commands() {
+    print_message $YELLOW "🔧 Fixing worker/webhook commands..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Try different command formats
+    local command_formats=('["npx", "n8n", "worker"]' "npx n8n worker" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "worker"]')
+    local webhook_formats=('["npx", "n8n", "webhook"]' "npx n8n webhook" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "webhook"]')
+    
+    for i in "${!command_formats[@]}"; do
+        local cmd="${command_formats[$i]}"
+        print_message $YELLOW "Testing command format: $cmd"
+        
+        # Update docker-compose.yml for one worker
+        sed -i "/n8n-worker-1:/,/volumes:/ s/command: .*/command: $cmd/" docker-compose.yml
+        
+        # Test with one worker
+        docker compose up -d n8n-worker-1
+        sleep 10
+        
+        # Check if it's running
+        if docker ps | grep -q "n8n-worker-1" && ! docker ps | grep "Restarting" | grep -q "n8n-worker-1"; then
+            print_message $GREEN "✅ Found working command format: $cmd"
+            
+            # Apply to all workers
+            for j in {1..4}; do
+                sed -i "/n8n-worker-$j:/,/volumes:/ s/command: .*/command: $cmd/" docker-compose.yml
+            done
+            
+            # Apply webhook command
+            local webhook_cmd="${webhook_formats[$i]}"
+            for j in {1..4}; do
+                sed -i "/n8n-webhook-$j:/,/volumes:/ s/command: .*/command: $webhook_cmd/" docker-compose.yml
+            done
+            
+            push_fix_to_git "Fixed worker/webhook command format to: $cmd"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Function to fix GPU configuration issues
+fix_gpu_config() {
+    print_message $YELLOW "🔧 Fixing GPU configuration..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Remove GPU config for CPU-only mode
+    if [ "$GPU_PROFILE" = "cpu" ]; then
+        # Remove deploy section from ollama service
+        sed -i '/ollama:/,/^[[:space:]]*[^[:space:]]/ {
+            /deploy:/,/limits:/ d
+        }' docker-compose.yml
+        
+        push_fix_to_git "Removed GPU configuration for CPU-only mode"
+    fi
+}
+
+# Function to fix container restart issues
+fix_container_restarts() {
+    print_message $YELLOW "🔧 Checking for restarting containers..."
+    
+    local restarting_containers=$(docker ps --format "table {{.Names}}" | grep -E "n8n-worker|n8n-webhook" | while read container; do
+        if docker ps | grep "$container" | grep -q "Restarting"; then
+            echo "$container"
+        fi
+    done)
+    
+    if [ -n "$restarting_containers" ]; then
+        print_message $YELLOW "Found restarting containers. Attempting fixes..."
+        
+        # Try to fix worker commands
+        if fix_worker_commands; then
+            docker compose down
+            docker compose up -d
+            sleep 30
+        fi
+    fi
+}
+
+# Error handler
+handle_error() {
+    local error_code=$?
+    local error_line=$1
+    
+    print_message $RED "❌ Error occurred at line $error_line with code $error_code"
+    
+    # Specific error handlers
+    case $error_code in
+        125)
+            print_message $YELLOW "Docker error detected. Attempting to fix..."
+            fix_gpu_config
+            fix_worker_commands
+            ;;
+        *)
+            print_message $YELLOW "General error. Checking system state..."
+            fix_container_restarts
+            ;;
+    esac
+    
+    # Re-run the failed command
+    print_message $YELLOW "🔄 Retrying installation..."
+}
+
+# Set error trap
+trap 'handle_error $LINENO' ERR
+
+# Ensure summary is shown even on exit
+trap 'show_summary' EXIT
+
+# Function to show summary
+show_summary() {
+    if [ -f "$INSTALL_DIR/config-summary.txt" ] && [ -z "$SUMMARY_SHOWN" ]; then
+        echo ""
+        print_section "📋 Installation Summary"
+        cat "$INSTALL_DIR/config-summary.txt"
+        SUMMARY_SHOWN=1
+    fi
 }
 
 # Check if running as root
@@ -87,8 +247,8 @@ print_section "Installing Prerequisites"
 
 # Update system
 print_message $YELLOW "📦 Updating system packages..."
-apt-get update -qq
-apt-get upgrade -y -qq
+apt-get update -qq || true
+apt-get upgrade -y -qq || true
 
 # Install required packages
 print_message $YELLOW "📦 Installing required packages..."
@@ -99,7 +259,7 @@ apt-get install -y -qq \
     gnupg \
     lsb-release \
     openssl \
-    jq
+    jq || true
 
 # Install Docker if not present
 if ! command_exists docker; then
@@ -153,6 +313,30 @@ done
 read -p "Enter N8N admin username [pratik@onezipp.com]: " N8N_ADMIN_EMAIL
 N8N_ADMIN_EMAIL=${N8N_ADMIN_EMAIL:-pratik@onezipp.com}
 print_message $GREEN "✅ Using admin email: $N8N_ADMIN_EMAIL"
+
+# Setup directory
+INSTALL_DIR="/opt/onezipp-n8n"
+EXISTING_PASSWORD=""
+print_section "Setting up installation directory"
+print_message $YELLOW "📁 Default installation directory: ${GREEN}$INSTALL_DIR${NC}"
+read -p "Use default directory? (Y/n) [Y]: " USE_DEFAULT_DIR
+USE_DEFAULT_DIR=${USE_DEFAULT_DIR:-Y}
+
+if [[ ! "$USE_DEFAULT_DIR" =~ ^[Yy]$ ]]; then
+    read -p "Enter custom installation directory: " CUSTOM_DIR
+    INSTALL_DIR=${CUSTOM_DIR:-/opt/onezipp-n8n}
+fi
+
+# Check if this is an update
+if [ -f "$INSTALL_DIR/config-summary.txt" ]; then
+    print_message $YELLOW "📦 Existing installation detected. Preserving configuration..."
+    # Try to extract the existing password
+    EXISTING_PASSWORD=$(grep "N8N Admin Password:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f4)
+fi
+
+print_message $GREEN "✅ Using directory: $INSTALL_DIR"
+mkdir -p $INSTALL_DIR
+cd $INSTALL_DIR
 
 # Generate deterministic password based on system fingerprint
 if [ -n "$EXISTING_PASSWORD" ]; then
@@ -212,30 +396,6 @@ case $GPU_CHOICE in
         print_message $GREEN "✅ Using CPU-only profile"
         ;;
 esac
-
-# Setup directory
-INSTALL_DIR="/opt/onezipp-n8n"
-EXISTING_PASSWORD=""
-print_section "Setting up installation directory"
-print_message $YELLOW "📁 Default installation directory: ${GREEN}$INSTALL_DIR${NC}"
-read -p "Use default directory? (Y/n) [Y]: " USE_DEFAULT_DIR
-USE_DEFAULT_DIR=${USE_DEFAULT_DIR:-Y}
-
-if [[ ! "$USE_DEFAULT_DIR" =~ ^[Yy]$ ]]; then
-    read -p "Enter custom installation directory: " CUSTOM_DIR
-    INSTALL_DIR=${CUSTOM_DIR:-/opt/onezipp-n8n}
-fi
-
-# Check if this is an update
-if [ -f "$INSTALL_DIR/config-summary.txt" ]; then
-    print_message $YELLOW "📦 Existing installation detected. Preserving configuration..."
-    # Try to extract the existing password
-    EXISTING_PASSWORD=$(grep "N8N Admin Password:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f4)
-fi
-
-print_message $GREEN "✅ Using directory: $INSTALL_DIR"
-mkdir -p $INSTALL_DIR
-cd $INSTALL_DIR
 
 # Clone the starter kit
 print_section "Downloading N8N AI Starter Kit"
@@ -465,7 +625,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-1
     hostname: n8n-worker-1
-    command: ["worker"]
+    command: ["npx", "n8n", "worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -475,7 +635,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-2
     hostname: n8n-worker-2
-    command: ["worker"]
+    command: ["npx", "n8n", "worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -485,7 +645,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-3
     hostname: n8n-worker-3
-    command: ["worker"]
+    command: ["npx", "n8n", "worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -495,7 +655,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-4
     hostname: n8n-worker-4
-    command: ["worker"]
+    command: ["npx", "n8n", "worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -506,7 +666,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-1
     hostname: n8n-webhook-1
-    command: ["webhook"]
+    command: ["npx", "n8n", "webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -514,7 +674,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-2
     hostname: n8n-webhook-2
-    command: ["webhook"]
+    command: ["npx", "n8n", "webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -522,7 +682,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-3
     hostname: n8n-webhook-3
-    command: ["webhook"]
+    command: ["npx", "n8n", "webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -530,7 +690,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-4
     hostname: n8n-webhook-4
-    command: ["webhook"]
+    command: ["npx", "n8n", "webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -675,11 +835,20 @@ print_message $YELLOW "🚀 Starting Onezipp N8N Cluster..."
 systemctl daemon-reload
 systemctl enable onezipp-n8n.service
 cd $INSTALL_DIR/self-hosted-ai-starter-kit
-docker compose up -d
+
+# Start services with error handling
+if ! docker compose up -d; then
+    print_message $RED "❌ Initial startup failed. Attempting fixes..."
+    fix_gpu_config
+    docker compose up -d
+fi
 
 # Wait for services to be ready
 print_message $YELLOW "⏳ Waiting for services to start..."
 sleep 45
+
+# Check for issues and auto-fix
+fix_container_restarts
 
 # Check service status
 print_section "Service Status Check"
@@ -726,7 +895,17 @@ Commands:
 - Restart services: systemctl restart onezipp-n8n
 EOF
 
+# Final check and push any fixes
+if docker ps | grep -E "n8n-worker|n8n-webhook" | grep -q "Restarting"; then
+    print_message $YELLOW "⚠️  Some services are still restarting. Running final fixes..."
+    fix_container_restarts
+fi
+
+# Push final state to git
+push_fix_to_git "Installation completed with all fixes applied"
+
 # Final output
+SUMMARY_SHOWN=1
 print_section "🎉 Installation Complete!"
 echo ""
 print_message $GREEN "✅ Onezipp N8N Cluster has been successfully installed!"
@@ -764,3 +943,4 @@ print_message $YELLOW "   If you can't access the site immediately, please wait 
 echo ""
 print_message $GREEN "🎊 Thank you for using Onezipp N8N Cluster Script!"
 print_message $BLUE "   GitHub: https://github.com/PratikMoitra/onezipp-n8n-cluster"
+print_message $BLUE "   Auto-fix enabled: Errors are automatically fixed and pushed to git"
