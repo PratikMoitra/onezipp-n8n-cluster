@@ -127,8 +127,8 @@ echo ""
 
 # Domain configuration
 while true; do
-    read -p "Enter your domain/subdomain [n8n.example.com]: " DOMAIN
-    DOMAIN=${DOMAIN:-n8n.example.com}
+    read -p "Enter your domain/subdomain [stepper.onezipp.com]: " DOMAIN
+    DOMAIN=${DOMAIN:-stepper.onezipp.com}
     if validate_domain "$DOMAIN"; then
         print_message $GREEN "✅ Using domain: $DOMAIN"
         break
@@ -139,8 +139,8 @@ done
 
 # Email for Let's Encrypt
 while true; do
-    read -p "Enter your email for SSL certificates [admin@${DOMAIN#*.}]: " EMAIL
-    EMAIL=${EMAIL:-admin@${DOMAIN#*.}}
+    read -p "Enter your email for SSL certificates [pratik@onezipp.com]: " EMAIL
+    EMAIL=${EMAIL:-pratik@onezipp.com}
     if validate_email "$EMAIL"; then
         print_message $GREEN "✅ Using email: $EMAIL"
         break
@@ -150,14 +150,21 @@ while true; do
 done
 
 # N8N admin credentials
-read -p "Enter N8N admin username [admin@${DOMAIN#*.}]: " N8N_ADMIN_EMAIL
-N8N_ADMIN_EMAIL=${N8N_ADMIN_EMAIL:-admin@${DOMAIN#*.}}
+read -p "Enter N8N admin username [pratik@onezipp.com]: " N8N_ADMIN_EMAIL
+N8N_ADMIN_EMAIL=${N8N_ADMIN_EMAIL:-pratik@onezipp.com}
 print_message $GREEN "✅ Using admin email: $N8N_ADMIN_EMAIL"
 
-# Generate default password
-DEFAULT_PASSWORD=$(generate_random_string 12)
+# Generate deterministic password based on system fingerprint
+if [ -n "$EXISTING_PASSWORD" ]; then
+    DEFAULT_PASSWORD=$EXISTING_PASSWORD
+    print_message $YELLOW "Using existing password from previous installation"
+else
+    SYSTEM_ID=$(cat /etc/machine-id 2>/dev/null || hostname -f || echo "default")
+    DEFAULT_PASSWORD=$(echo -n "${SYSTEM_ID}onezipp" | sha256sum | cut -c1-12)
+fi
 echo ""
 print_message $YELLOW "Generated secure password: ${GREEN}${DEFAULT_PASSWORD}${NC}"
+print_message $BLUE "   (This password is unique to this server and will remain the same on reinstalls)"
 read -p "Use this password? (Y/n) [Y]: " USE_DEFAULT_PASS
 USE_DEFAULT_PASS=${USE_DEFAULT_PASS:-Y}
 
@@ -208,6 +215,7 @@ esac
 
 # Setup directory
 INSTALL_DIR="/opt/onezipp-n8n"
+EXISTING_PASSWORD=""
 print_section "Setting up installation directory"
 print_message $YELLOW "📁 Default installation directory: ${GREEN}$INSTALL_DIR${NC}"
 read -p "Use default directory? (Y/n) [Y]: " USE_DEFAULT_DIR
@@ -216,6 +224,13 @@ USE_DEFAULT_DIR=${USE_DEFAULT_DIR:-Y}
 if [[ ! "$USE_DEFAULT_DIR" =~ ^[Yy]$ ]]; then
     read -p "Enter custom installation directory: " CUSTOM_DIR
     INSTALL_DIR=${CUSTOM_DIR:-/opt/onezipp-n8n}
+fi
+
+# Check if this is an update
+if [ -f "$INSTALL_DIR/config-summary.txt" ]; then
+    print_message $YELLOW "📦 Existing installation detected. Preserving configuration..."
+    # Try to extract the existing password
+    EXISTING_PASSWORD=$(grep "N8N Admin Password:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f4)
 fi
 
 print_message $GREEN "✅ Using directory: $INSTALL_DIR"
@@ -345,6 +360,8 @@ EOF
 
 # Create custom docker-compose file
 print_message $YELLOW "📝 Creating docker-compose.yml..."
+
+# Create base docker-compose without GPU config
 cat > docker-compose.yml << 'DOCKERCOMPOSE_EOF'
 x-n8n-base: &n8n-base
   image: n8nio/n8n:latest
@@ -529,6 +546,11 @@ services:
       - ollama_storage:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
+DOCKERCOMPOSE_EOF
+
+# Add GPU configuration only if GPU is selected
+if [ "$GPU_PROFILE" = "gpu-nvidia" ]; then
+    cat >> docker-compose.yml << 'GPU_CONFIG_EOF'
     deploy:
       resources:
         reservations:
@@ -538,6 +560,20 @@ services:
               capabilities: [gpu]
         limits:
           memory: 4G
+GPU_CONFIG_EOF
+elif [ "$GPU_PROFILE" = "gpu-amd" ]; then
+    cat >> docker-compose.yml << 'GPU_CONFIG_EOF'
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+GPU_CONFIG_EOF
+fi
+
+# Continue with the rest of docker-compose.yml
+cat >> docker-compose.yml << 'DOCKERCOMPOSE_END_EOF'
 
   # Ollama model puller
   ollama-pull:
@@ -578,7 +614,7 @@ volumes:
 networks:
   n8n-network:
     driver: bridge
-DOCKERCOMPOSE_EOF
+DOCKERCOMPOSE_END_EOF
 
 # Create startup script
 print_message $YELLOW "📝 Creating startup script..."
