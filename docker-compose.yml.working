@@ -1,0 +1,282 @@
+services:
+  # Caddy Reverse Proxy
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: ['n8n-network']
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    networks: ['n8n-network']
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres_storage:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n -d n8n"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Queue Management
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    networks: ['n8n-network']
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_storage:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # N8N Main Instance (UI/API)
+  n8n-main:
+    image: n8nio/n8n:latest
+    container_name: n8n-main
+    hostname: n8n-main
+    networks: ['n8n-network']
+    ports:
+      - "5678:443"
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # N8N Worker Nodes
+  n8n-worker-1:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker-1
+    hostname: n8n-worker-1
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=worker
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  n8n-worker-2:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker-2
+    hostname: n8n-worker-2
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=worker
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  n8n-worker-3:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker-3
+    hostname: n8n-worker-3
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=worker
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  n8n-worker-4:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker-4
+    hostname: n8n-worker-4
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=worker
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # N8N Webhook Processor Nodes
+  n8n-webhook-1:
+    image: n8nio/n8n:latest
+    container_name: n8n-webhook-1
+    hostname: n8n-webhook-1
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=webhook
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  n8n-webhook-2:
+    image: n8nio/n8n:latest
+    container_name: n8n-webhook-2
+    hostname: n8n-webhook-2
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=webhook
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  n8n-webhook-3:
+    image: n8nio/n8n:latest
+    container_name: n8n-webhook-3
+    hostname: n8n-webhook-3
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=webhook
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  n8n-webhook-4:
+    image: n8nio/n8n:latest
+    container_name: n8n-webhook-4
+    hostname: n8n-webhook-4
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
+    environment:
+      - EXECUTIONS_PROCESS=webhook
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Ollama AI Model Server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    networks: ['n8n-network']
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_storage:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+
+  # Ollama model puller
+  ollama-pull:
+    image: ollama/ollama:latest
+    networks: ['n8n-network']
+    container_name: ollama-pull
+    volumes:
+      - ollama_storage:/root/.ollama
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: /bin/sh
+    command:
+      - "-c"
+      - "sleep 10 && ollama pull llama3.2 && ollama pull nomic-embed-text"
+    depends_on:
+      - ollama
+
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    networks: ['n8n-network']
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  n8n_storage:
+  postgres_storage:
+  redis_storage:
+  ollama_storage:
+  qdrant_storage:
+  caddy_data:
+  caddy_config:
+
+networks:
+  n8n-network:
+    driver: bridge

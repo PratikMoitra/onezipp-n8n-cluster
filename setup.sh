@@ -1,15 +1,33 @@
 #!/bin/bash
 
+# Onezipp N8N Cluster Setup Script v2.0
+# Sets up a production-ready n8n instance with clustering, SSL, backups, and AI capabilities
+# Features: Dynamic worker/webhook scaling, automatic fixes, GitHub backup integration
+# Repository: https://github.com/PratikMoitra/onezipp-n8n-cluster
+
 # =============================================================================
-# Onezipp N8N Cluster Script - Production Ready Setup with Auto-Fix
+# Onezipp N8N Cluster Script - Production Ready Setup with Auto-Fix & Backup
 # =============================================================================
 # This script sets up n8n self-hosted AI starter kit with:
 # - Caddy reverse proxy with SSL
-# - N8N in queue mode with 4 worker nodes and 4 webhook nodes
+# - N8N in queue mode with configurable worker and webhook nodes (1-10 each)
 # - Redis for queue management
 # - PostgreSQL database
 # - Ollama, Qdrant for AI capabilities
 # - AUTO-FIX: Automatically fixes common errors and pushes to git
+#   - Worker/webhook command issues
+#   - GPU configuration problems
+#   - Deprecated webhook URL variables
+#   - Caddy port mismatches
+#   - PostgreSQL password issues
+#   - Encryption key mismatches
+# - BACKUP: Automatic daily backups with easy restore capability
+#   - Local backups with rotation (keeps last 7)
+#   - Optional GitHub backup integration with encrypted token
+#   - Configuration backups included
+# - Fixed webhook URLs to use your domain instead of localhost
+# - Optimized docker-compose with dynamic service generation
+# - Uses loops for efficient configuration and management
 # =============================================================================
 
 set -e
@@ -21,17 +39,26 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Git repository info
+# Git repository info (customize this for your own repo)
 GIT_REPO_DIR="$HOME/onezipp-n8n-cluster"
 GIT_REMOTE="https://github.com/PratikMoitra/onezipp-n8n-cluster.git"
 SUMMARY_SHOWN=""
+
+# Default values for worker and webhook counts
+WORKER_COUNT=4
+WEBHOOK_COUNT=4
+
+# GitHub backup defaults
+ENABLE_GITHUB_BACKUP="N"
+GITHUB_TOKEN=""
+GITHUB_BACKUP_REPO=""
 
 # Banner
 echo -e "${BLUE}"
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║                                                              ║"
 echo "║           🚀 Onezipp N8N Cluster Setup Script 🚀            ║"
-echo "║                   with Auto-Fix Capability                   ║"
+echo "║        with Auto-Fix, Backup & Dynamic Configuration         ║"
 echo "║     Production-Ready N8N with AI Starter Kit & Caddy        ║"
 echo "║                                                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
@@ -56,6 +83,15 @@ print_section() {
 push_fix_to_git() {
     local fix_message=$1
     local current_dir=$(pwd)
+    
+    # Initialize git repo if it doesn't exist
+    if [ ! -d "$GIT_REPO_DIR" ]; then
+        mkdir -p "$GIT_REPO_DIR"
+        cd "$GIT_REPO_DIR"
+        git init
+        git remote add origin "$GIT_REMOTE" 2>/dev/null || true
+        cd "$current_dir"
+    fi
     
     if [ -d "$GIT_REPO_DIR" ]; then
         cd "$GIT_REPO_DIR"
@@ -93,19 +129,28 @@ fix_worker_commands() {
     if grep -q "command: worker" docker-compose.yml || grep -q "command: webhook" docker-compose.yml; then
         print_message $YELLOW "Updating to environment-based configuration..."
         
-        # Remove command lines from workers and webhooks
-        sed -i '/n8n-worker-[1-4]:/,/volumes:/ { /command:/d; }' docker-compose.yml
-        sed -i '/n8n-webhook-[1-4]:/,/volumes:/ { /command:/d; }' docker-compose.yml
+        # Get current worker and webhook counts
+        local current_workers=$(grep -c "n8n-worker-" docker-compose.yml)
+        local current_webhooks=$(grep -c "n8n-webhook-" docker-compose.yml)
+        
+        # Remove command lines from workers and webhooks using loops
+        for i in $(seq 1 $current_workers); do
+            sed -i "/n8n-worker-$i:/,/volumes:/ { /command:/d; }" docker-compose.yml
+        done
+        
+        for i in $(seq 1 $current_webhooks); do
+            sed -i "/n8n-webhook-$i:/,/volumes:/ { /command:/d; }" docker-compose.yml
+        done
         
         # Add EXECUTIONS_PROCESS environment variable for workers
-        for i in {1..4}; do
+        for i in $(seq 1 $current_workers); do
             sed -i "/n8n-worker-$i:/,/volumes:/ {
                 /environment:/a\      - EXECUTIONS_PROCESS=worker\n      - N8N_DISABLE_UI=true\n      - N8N_DISABLE_EDITOR=true
             }" docker-compose.yml
         done
         
         # Add EXECUTIONS_PROCESS environment variable for webhooks
-        for i in {1..4}; do
+        for i in $(seq 1 $current_webhooks); do
             sed -i "/n8n-webhook-$i:/,/volumes:/ {
                 /hostname:/a\    environment:\n      - EXECUTIONS_MODE=\${EXECUTIONS_MODE}\n      - QUEUE_BULL_REDIS_HOST=\${QUEUE_BULL_REDIS_HOST}\n      - QUEUE_BULL_REDIS_PORT=\${QUEUE_BULL_REDIS_PORT}\n      - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}\n      - N8N_DISABLE_UI=true\n      - N8N_DISABLE_EDITOR=true\n      - EXECUTIONS_PROCESS=webhook
             }" docker-compose.yml
@@ -133,6 +178,29 @@ fix_gpu_config() {
         
         push_fix_to_git "Removed GPU configuration for CPU-only mode"
     fi
+}
+
+# Function to fix Caddy port mismatch
+fix_caddy_ports() {
+    print_message $YELLOW "🔧 Fixing Caddy proxy port configuration..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Check if Caddyfile is using port 5678 but n8n is on 443
+    if grep -q "n8n-main:5678" caddy/Caddyfile && grep -q "N8N_PORT=443" .env; then
+        print_message $YELLOW "Updating Caddyfile to use correct port 443..."
+        
+        # Update all references from 5678 to 443
+        sed -i 's/:5678/:443/g' caddy/Caddyfile
+        
+        # Restart Caddy
+        docker restart caddy
+        
+        push_fix_to_git "Fixed Caddy port configuration to match n8n port 443"
+        return 0
+    fi
+    
+    return 1
 }
 
 # Function to fix deprecated webhook URL variables
@@ -168,11 +236,75 @@ fix_webhook_urls() {
     return 0
 }
 
+# Function to fix encryption key mismatch
+fix_encryption_key() {
+    print_message $YELLOW "🔧 Checking for encryption key issues..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Check if main instance has encryption key mismatch
+    if docker logs n8n-main 2>&1 | grep -q "Mismatching encryption keys"; then
+        print_message $YELLOW "Encryption key mismatch detected. Fixing..."
+        
+        # Remove the old config file
+        docker exec n8n-main rm -f /home/node/.n8n/config 2>/dev/null || true
+        
+        # Restart n8n-main to recreate config with current key
+        docker restart n8n-main
+        
+        push_fix_to_git "Fixed encryption key mismatch"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to fix PostgreSQL password issues
+fix_postgres_password() {
+    print_message $YELLOW "🔧 Checking PostgreSQL password configuration..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Check if containers are failing due to postgres auth
+    if docker logs n8n-worker-1 2>&1 | grep -q "password authentication failed"; then
+        print_message $YELLOW "PostgreSQL password mismatch detected. Attempting to fix..."
+        
+        # Get the current password from .env
+        local CURRENT_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2)
+        
+        # Try to update the PostgreSQL password
+        if docker exec -it postgres psql -U postgres -c "ALTER USER n8n WITH PASSWORD '$CURRENT_PASSWORD';" 2>/dev/null; then
+            print_message $GREEN "✅ PostgreSQL password updated successfully"
+            
+            # Get current counts
+            local worker_count=$(docker ps -a --filter "name=n8n-worker-" -q | wc -l)
+            local webhook_count=$(docker ps -a --filter "name=n8n-webhook-" -q | wc -l)
+            
+            # Restart all n8n services using loops
+            docker restart n8n-main
+            for i in $(seq 1 $worker_count); do
+                docker restart n8n-worker-$i 2>/dev/null
+            done
+            for i in $(seq 1 $webhook_count); do
+                docker restart n8n-webhook-$i 2>/dev/null
+            done
+            
+            push_fix_to_git "Fixed PostgreSQL password mismatch"
+            return 0
+        else
+            print_message $YELLOW "Could not update password. Database may need to be recreated."
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
 # Function to fix container restart issues
 fix_container_restarts() {
     print_message $YELLOW "🔧 Checking for restarting containers..."
     
-    local restarting_containers=$(docker ps --format "table {{.Names}}" | grep -E "n8n-worker|n8n-webhook" | while read container; do
+    local restarting_containers=$(docker ps --format "table {{.Names}}" | grep -E "n8n-" | while read container; do
         if docker ps | grep "$container" | grep -q "Restarting"; then
             echo "$container"
         fi
@@ -180,6 +312,12 @@ fix_container_restarts() {
     
     if [ -n "$restarting_containers" ]; then
         print_message $YELLOW "Found restarting containers. Attempting fixes..."
+        
+        # Try to fix encryption key issues first
+        fix_encryption_key
+        
+        # Try to fix PostgreSQL password
+        fix_postgres_password
         
         # Try to fix worker commands
         if fix_worker_commands; then
@@ -190,6 +328,9 @@ fix_container_restarts() {
         
         # Also fix webhook URLs
         fix_webhook_urls
+        
+        # Fix Caddy ports if needed
+        fix_caddy_ports
     fi
 }
 
@@ -207,6 +348,9 @@ handle_error() {
             fix_gpu_config
             fix_worker_commands
             fix_webhook_urls
+            fix_caddy_ports
+            fix_postgres_password
+            fix_encryption_key
             ;;
         *)
             print_message $YELLOW "General error. Checking system state..."
@@ -238,6 +382,26 @@ show_summary() {
 if [[ $EUID -ne 0 ]]; then
    print_message $RED "❌ This script must be run as root (use sudo)"
    exit 1
+fi
+
+# Check OS compatibility
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [[ ! "$ID" =~ ^(ubuntu|debian)$ ]]; then
+        print_message $YELLOW "⚠️  This script is tested on Ubuntu/Debian. Your OS: $ID"
+        read -p "Continue anyway? (y/N) [N]: " CONTINUE_ANYWAY
+        CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-N}
+        if [[ ! "$CONTINUE_ANYWAY" =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+else
+    print_message $YELLOW "⚠️  Cannot detect OS. This script is designed for Ubuntu/Debian."
+    read -p "Continue anyway? (y/N) [N]: " CONTINUE_ANYWAY
+    CONTINUE_ANYWAY=${CONTINUE_ANYWAY:-N}
+    if [[ ! "$CONTINUE_ANYWAY" =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
 fi
 
 # Function to check if command exists
@@ -278,16 +442,27 @@ print_message $YELLOW "📦 Updating system packages..."
 apt-get update -qq || true
 apt-get upgrade -y -qq || true
 
-# Install required packages
+# Define required packages
+REQUIRED_PACKAGES=(
+    "curl"
+    "git"
+    "ca-certificates"
+    "gnupg"
+    "lsb-release"
+    "openssl"
+    "jq"
+)
+
+# Install required packages using loop
 print_message $YELLOW "📦 Installing required packages..."
-apt-get install -y -qq \
-    curl \
-    git \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    openssl \
-    jq || true
+for package in "${REQUIRED_PACKAGES[@]}"; do
+    if ! dpkg -l | grep -q "^ii  $package"; then
+        print_message $YELLOW "   Installing $package..."
+        apt-get install -y -qq "$package" || true
+    else
+        print_message $GREEN "   ✓ $package already installed"
+    fi
+done
 
 # Install Docker if not present
 if ! command_exists docker; then
@@ -345,6 +520,10 @@ print_message $GREEN "✅ Using admin email: $N8N_ADMIN_EMAIL"
 # Setup directory
 INSTALL_DIR="/opt/onezipp-n8n"
 EXISTING_PASSWORD=""
+EXISTING_POSTGRES_PASSWORD=""
+EXISTING_REDIS_PASSWORD=""
+EXISTING_ENCRYPTION_KEY=""
+EXISTING_JWT_SECRET=""
 print_section "Setting up installation directory"
 print_message $YELLOW "📁 Default installation directory: ${GREEN}$INSTALL_DIR${NC}"
 read -p "Use default directory? (Y/n) [Y]: " USE_DEFAULT_DIR
@@ -358,8 +537,30 @@ fi
 # Check if this is an update
 if [ -f "$INSTALL_DIR/config-summary.txt" ]; then
     print_message $YELLOW "📦 Existing installation detected. Preserving configuration..."
-    # Try to extract the existing password
+    # Try to extract existing configurations
     EXISTING_PASSWORD=$(grep "N8N Admin Password:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f4)
+    EXISTING_POSTGRES_PASSWORD=$(grep "PostgreSQL Password:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f3)
+    EXISTING_REDIS_PASSWORD=$(grep "Redis Password:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f3)
+    EXISTING_ENCRYPTION_KEY=$(grep "N8N Encryption Key:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f4)
+    EXISTING_JWT_SECRET=$(grep "N8N JWT Secret:" "$INSTALL_DIR/config-summary.txt" | cut -d' ' -f4)
+fi
+
+# Load existing cluster configuration
+if [ -f "$INSTALL_DIR/cluster-config" ]; then
+    source "$INSTALL_DIR/cluster-config"
+    print_message $YELLOW "📊 Found existing cluster config: $WORKER_COUNT workers, $WEBHOOK_COUNT webhooks"
+fi
+
+# Also check existing .env file as it's more reliable
+if [ -f "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" ]; then
+    print_message $YELLOW "📄 Found existing .env file. Extracting configuration..."
+    source "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" 2>/dev/null || true
+    # Use .env values if they exist and summary values don't
+    [ -z "$EXISTING_POSTGRES_PASSWORD" ] && [ -n "$POSTGRES_PASSWORD" ] && EXISTING_POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+    [ -z "$EXISTING_REDIS_PASSWORD" ] && [ -n "$REDIS_PASSWORD" ] && EXISTING_REDIS_PASSWORD=$REDIS_PASSWORD
+    [ -z "$EXISTING_ENCRYPTION_KEY" ] && [ -n "$N8N_ENCRYPTION_KEY" ] && EXISTING_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
+    [ -z "$EXISTING_JWT_SECRET" ] && [ -n "$N8N_USER_MANAGEMENT_JWT_SECRET" ] && EXISTING_JWT_SECRET=$N8N_USER_MANAGEMENT_JWT_SECRET
+    [ -z "$EXISTING_PASSWORD" ] && [ -n "$N8N_BASIC_AUTH_PASSWORD" ] && EXISTING_PASSWORD=$N8N_BASIC_AUTH_PASSWORD
 fi
 
 print_message $GREEN "✅ Using directory: $INSTALL_DIR"
@@ -397,10 +598,105 @@ fi
 
 # Database passwords
 print_message $YELLOW "🔐 Generating secure passwords..."
-POSTGRES_PASSWORD=$(generate_random_string 24)
-REDIS_PASSWORD=$(generate_random_string 24)
-N8N_ENCRYPTION_KEY=$(generate_random_string 32)
-N8N_JWT_SECRET=$(generate_random_string 32)
+
+# Use existing configurations if found, otherwise generate new
+if [ -n "$EXISTING_POSTGRES_PASSWORD" ]; then
+    POSTGRES_PASSWORD=$EXISTING_POSTGRES_PASSWORD
+    print_message $YELLOW "Using existing PostgreSQL password from previous installation"
+else
+    POSTGRES_PASSWORD=$(generate_random_string 24)
+fi
+
+if [ -n "$EXISTING_REDIS_PASSWORD" ]; then
+    REDIS_PASSWORD=$EXISTING_REDIS_PASSWORD
+    print_message $YELLOW "Using existing Redis password from previous installation"
+else
+    REDIS_PASSWORD=$(generate_random_string 24)
+fi
+
+if [ -n "$EXISTING_ENCRYPTION_KEY" ]; then
+    N8N_ENCRYPTION_KEY=$EXISTING_ENCRYPTION_KEY
+    print_message $YELLOW "Using existing encryption key from previous installation"
+else
+    N8N_ENCRYPTION_KEY=$(generate_random_string 32)
+fi
+
+if [ -n "$EXISTING_JWT_SECRET" ]; then
+    N8N_JWT_SECRET=$EXISTING_JWT_SECRET
+    print_message $YELLOW "Using existing JWT secret from previous installation"
+else
+    N8N_JWT_SECRET=$(generate_random_string 32)
+fi
+
+# Worker and webhook configuration
+print_section "Worker and Webhook Configuration"
+
+# Get number of workers
+while true; do
+    read -p "How many worker nodes do you want? (1-10) [4]: " WORKER_COUNT
+    WORKER_COUNT=${WORKER_COUNT:-4}
+    if [[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] && [ "$WORKER_COUNT" -ge 1 ] && [ "$WORKER_COUNT" -le 10 ]; then
+        print_message $GREEN "✅ Setting up $WORKER_COUNT worker nodes"
+        break
+    else
+        print_message $RED "❌ Please enter a number between 1 and 10"
+    fi
+done
+
+# Get number of webhooks
+while true; do
+    read -p "How many webhook nodes do you want? (1-10) [4]: " WEBHOOK_COUNT
+    WEBHOOK_COUNT=${WEBHOOK_COUNT:-4}
+    if [[ "$WEBHOOK_COUNT" =~ ^[0-9]+$ ]] && [ "$WEBHOOK_COUNT" -ge 1 ] && [ "$WEBHOOK_COUNT" -le 10 ]; then
+        print_message $GREEN "✅ Setting up $WEBHOOK_COUNT webhook nodes"
+        break
+    else
+        print_message $RED "❌ Please enter a number between 1 and 10"
+    fi
+done
+
+# GitHub backup configuration
+print_section "GitHub Backup Configuration"
+print_message $YELLOW "💡 Backups can be automatically pushed to your GitHub repository"
+print_message $YELLOW "   This requires a GitHub Personal Access Token with 'repo' scope"
+print_message $YELLOW "   Create one at: https://github.com/settings/tokens"
+echo ""
+
+read -p "Enable GitHub backup? (y/N) [N]: " ENABLE_GITHUB_BACKUP
+ENABLE_GITHUB_BACKUP=${ENABLE_GITHUB_BACKUP:-N}
+
+GITHUB_TOKEN=""
+GITHUB_BACKUP_REPO=""
+if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
+    # Check for existing encrypted token
+    if [ -f "$INSTALL_DIR/.github-token.enc" ]; then
+        print_message $YELLOW "📦 Found existing GitHub token configuration"
+        read -p "Use existing token? (Y/n) [Y]: " USE_EXISTING_TOKEN
+        USE_EXISTING_TOKEN=${USE_EXISTING_TOKEN:-Y}
+        
+        if [[ "$USE_EXISTING_TOKEN" =~ ^[Yy]$ ]]; then
+            # Decrypt existing token
+            GITHUB_TOKEN=$(openssl enc -aes-256-cbc -d -in "$INSTALL_DIR/.github-token.enc" -k "${DOMAIN}${N8N_ENCRYPTION_KEY}" 2>/dev/null || echo "")
+            if [ -f "$INSTALL_DIR/.github-repo" ]; then
+                GITHUB_BACKUP_REPO=$(cat "$INSTALL_DIR/.github-repo")
+            fi
+        fi
+    fi
+    
+    if [ -z "$GITHUB_TOKEN" ]; then
+        read -s -p "Enter your GitHub Personal Access Token: " GITHUB_TOKEN
+        echo
+        read -p "Enter backup repository (e.g., username/repo-name): " GITHUB_BACKUP_REPO
+        
+        # Encrypt and save token
+        echo -n "$GITHUB_TOKEN" | openssl enc -aes-256-cbc -e -out "$INSTALL_DIR/.github-token.enc" -k "${DOMAIN}${N8N_ENCRYPTION_KEY}"
+        echo -n "$GITHUB_BACKUP_REPO" > "$INSTALL_DIR/.github-repo"
+        chmod 600 "$INSTALL_DIR/.github-token.enc"
+        chmod 600 "$INSTALL_DIR/.github-repo"
+        
+        print_message $GREEN "✅ GitHub token encrypted and saved"
+    fi
+fi
 
 # GPU selection
 print_message $YELLOW "🖥️  Select your GPU type:"
@@ -434,6 +730,12 @@ fi
 git clone https://github.com/n8n-io/self-hosted-ai-starter-kit.git
 cd self-hosted-ai-starter-kit
 
+# Save cluster configuration early for recovery
+cat > $INSTALL_DIR/cluster-config << EOF
+WORKER_COUNT=${WORKER_COUNT}
+WEBHOOK_COUNT=${WEBHOOK_COUNT}
+EOF
+
 # Create environment file
 print_section "Creating Configuration Files"
 print_message $YELLOW "📝 Creating .env file..."
@@ -455,6 +757,8 @@ N8N_BASIC_AUTH_ACTIVE=true
 N8N_BASIC_AUTH_USER=${N8N_ADMIN_EMAIL}
 N8N_BASIC_AUTH_PASSWORD=${N8N_ADMIN_PASSWORD}
 N8N_RUNNERS_ENABLED=true
+N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
 
 # Domain Configuration
 DOMAIN=${DOMAIN}
@@ -469,6 +773,7 @@ QUEUE_HEALTH_CHECK_ACTIVE=true
 
 # Worker Configuration
 N8N_CONCURRENCY=10
+OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
 
 # Task Runners Configuration
 N8N_RUNNERS_ENABLED=true
@@ -487,6 +792,8 @@ EOF
 # Create Caddyfile
 print_message $YELLOW "📝 Creating Caddyfile..."
 mkdir -p caddy
+
+# Start creating Caddyfile
 cat > caddy/Caddyfile << EOF
 {
     email ${EMAIL}
@@ -509,16 +816,21 @@ ${DOMAIN} {
         header Upgrade websocket
     }
     
-    # Reverse proxy to main n8n instance
-    reverse_proxy @api n8n-main:5678
-    reverse_proxy @websocket n8n-main:5678
+    # Reverse proxy to main n8n instance (port 443 since N8N_PORT=443)
+    reverse_proxy @api n8n-main:443
+    reverse_proxy @websocket n8n-main:443
     
     # Load balance webhook requests across webhook processors
     reverse_proxy /webhook/* {
-        to n8n-webhook-1:5678
-        to n8n-webhook-2:5678
-        to n8n-webhook-3:5678
-        to n8n-webhook-4:5678
+EOF
+
+# Add webhook nodes to load balancer using loop
+for i in $(seq 1 $WEBHOOK_COUNT); do
+    echo "        to n8n-webhook-$i:443" >> caddy/Caddyfile
+done
+
+# Complete Caddyfile
+cat >> caddy/Caddyfile << EOF
         lb_policy round_robin
         health_uri /healthz
         health_interval 10s
@@ -526,7 +838,7 @@ ${DOMAIN} {
     }
     
     # Default to main instance for everything else
-    reverse_proxy n8n-main:5678
+    reverse_proxy n8n-main:443
     
     # Security headers
     header {
@@ -550,40 +862,8 @@ EOF
 # Create custom docker-compose file
 print_message $YELLOW "📝 Creating docker-compose.yml..."
 
-# Create base docker-compose without GPU config
+# Create base docker-compose
 cat > docker-compose.yml << 'DOCKERCOMPOSE_EOF'
-x-n8n-base: &n8n-base
-  image: n8nio/n8n:latest
-  networks: ['n8n-network']
-  environment:
-    - DB_TYPE=postgresdb
-    - DB_POSTGRESDB_HOST=postgres
-    - DB_POSTGRESDB_USER=${POSTGRES_USER}
-    - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-    - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
-    - N8N_DIAGNOSTICS_ENABLED=false
-    - N8N_PERSONALIZATION_ENABLED=false
-    - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-    - N8N_USER_MANAGEMENT_JWT_SECRET=${N8N_USER_MANAGEMENT_JWT_SECRET}
-    - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
-    - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-    - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-    - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-    - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-    - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
-    - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
-    - N8N_WEBHOOK_BASE_URL=${N8N_WEBHOOK_BASE_URL}
-    - N8N_HOST=${N8N_HOST}
-    - N8N_PROTOCOL=${N8N_PROTOCOL}
-    - N8N_PORT=${N8N_PORT}
-    - OLLAMA_HOST=ollama:11434
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  restart: unless-stopped
-
 services:
   # Caddy Reverse Proxy
   caddy:
@@ -605,14 +885,12 @@ services:
     container_name: postgres
     networks: ['n8n-network']
     restart: unless-stopped
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+    env_file:
+      - .env
     volumes:
       - postgres_storage:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U n8n -d n8n"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -623,160 +901,97 @@ services:
     container_name: redis
     networks: ['n8n-network']
     restart: unless-stopped
+    env_file:
+      - .env
     command: redis-server --requirepass ${REDIS_PASSWORD}
     volumes:
       - redis_storage:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "--pass", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # N8N Main Instance (UI/API)
   n8n-main:
-    <<: *n8n-base
+    image: n8nio/n8n:latest
     container_name: n8n-main
     hostname: n8n-main
+    networks: ['n8n-network']
     ports:
-      - "5678:5678"
+      - "5678:443"
     volumes:
       - n8n_storage:/home/node/.n8n
       - ./shared:/data/shared
-    environment:
-      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE}
-      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
-      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
-  # N8N Worker Nodes
-  n8n-worker-1:
-    <<: *n8n-base
-    container_name: n8n-worker-1
-    hostname: n8n-worker-1
+DOCKERCOMPOSE_EOF
+
+# Add worker nodes using loop
+print_message $YELLOW "📝 Adding $WORKER_COUNT worker nodes..."
+for i in $(seq 1 $WORKER_COUNT); do
+    cat >> docker-compose.yml << EOF
+  # N8N Worker Node $i
+  n8n-worker-$i:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker-$i
+    hostname: n8n-worker-$i
+    networks: ['n8n-network']
+    volumes:
+      - ./shared:/data/shared
+    env_file:
+      - .env
     environment:
-      - N8N_CONCURRENCY=${N8N_CONCURRENCY}
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
       - EXECUTIONS_PROCESS=worker
-    volumes:
-      - ./shared:/data/shared
-
-  n8n-worker-2:
-    <<: *n8n-base
-    container_name: n8n-worker-2
-    hostname: n8n-worker-2
-    environment:
-      - N8N_CONCURRENCY=${N8N_CONCURRENCY}
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_DISABLE_UI=true
       - N8N_DISABLE_EDITOR=true
-      - EXECUTIONS_PROCESS=worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+EOF
+done
+
+# Add webhook nodes using loop
+print_message $YELLOW "📝 Adding $WEBHOOK_COUNT webhook nodes..."
+for i in $(seq 1 $WEBHOOK_COUNT); do
+    cat >> docker-compose.yml << EOF
+  # N8N Webhook Processor Node $i
+  n8n-webhook-$i:
+    image: n8nio/n8n:latest
+    container_name: n8n-webhook-$i
+    hostname: n8n-webhook-$i
+    networks: ['n8n-network']
     volumes:
       - ./shared:/data/shared
-
-  n8n-worker-3:
-    <<: *n8n-base
-    container_name: n8n-worker-3
-    hostname: n8n-worker-3
+    env_file:
+      - .env
     environment:
-      - N8N_CONCURRENCY=${N8N_CONCURRENCY}
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
-      - EXECUTIONS_PROCESS=worker
-    volumes:
-      - ./shared:/data/shared
-
-  n8n-worker-4:
-    <<: *n8n-base
-    container_name: n8n-worker-4
-    hostname: n8n-worker-4
-    environment:
-      - N8N_CONCURRENCY=${N8N_CONCURRENCY}
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
-      - EXECUTIONS_PROCESS=worker
-    volumes:
-      - ./shared:/data/shared
-
-  # N8N Webhook Processor Nodes
-  n8n-webhook-1:
-    <<: *n8n-base
-    container_name: n8n-webhook-1
-    hostname: n8n-webhook-1
-    environment:
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
       - EXECUTIONS_PROCESS=webhook
-    volumes:
-      - ./shared:/data/shared
-
-  n8n-webhook-2:
-    <<: *n8n-base
-    container_name: n8n-webhook-2
-    hostname: n8n-webhook-2
-    environment:
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_DISABLE_UI=true
       - N8N_DISABLE_EDITOR=true
-      - EXECUTIONS_PROCESS=webhook
-    volumes:
-      - ./shared:/data/shared
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
-  n8n-webhook-3:
-    <<: *n8n-base
-    container_name: n8n-webhook-3
-    hostname: n8n-webhook-3
-    environment:
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
-      - EXECUTIONS_PROCESS=webhook
-    volumes:
-      - ./shared:/data/shared
+EOF
+done
 
-  n8n-webhook-4:
-    <<: *n8n-base
-    container_name: n8n-webhook-4
-    hostname: n8n-webhook-4
-    environment:
-      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
-      - EXECUTIONS_PROCESS=webhook
-    volumes:
-      - ./shared:/data/shared
-
+# Add Ollama and remaining services
+cat >> docker-compose.yml << 'DOCKERCOMPOSE_END_EOF'
   # Ollama AI Model Server
   ollama:
     image: ollama/ollama:latest
@@ -789,7 +1004,7 @@ services:
       - ollama_storage:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
-DOCKERCOMPOSE_EOF
+DOCKERCOMPOSE_END_EOF
 
 # Add GPU configuration only if GPU is selected
 if [ "$GPU_PROFILE" = "gpu-nvidia" ]; then
@@ -816,7 +1031,7 @@ GPU_CONFIG_EOF
 fi
 
 # Continue with the rest of docker-compose.yml
-cat >> docker-compose.yml << 'DOCKERCOMPOSE_END_EOF'
+cat >> docker-compose.yml << 'DOCKERCOMPOSE_FINAL_EOF'
 
   # Ollama model puller
   ollama-pull:
@@ -857,23 +1072,84 @@ volumes:
 networks:
   n8n-network:
     driver: bridge
-DOCKERCOMPOSE_END_EOF
+DOCKERCOMPOSE_FINAL_EOF
+
+# Also need to add DB configuration to .env
+cat >> .env << EOF
+
+# Database type configuration
+DB_TYPE=postgresdb
+DB_POSTGRESDB_HOST=postgres
+DB_POSTGRESDB_USER=n8n
+DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+DB_POSTGRESDB_DATABASE=n8n
+EOF
 
 # Create startup script
 print_message $YELLOW "📝 Creating startup script..."
-cat > start.sh << EOF
+cat > start.sh << 'STARTUP_EOF'
 #!/bin/bash
-cd $INSTALL_DIR/self-hosted-ai-starter-kit
+cd /opt/onezipp-n8n/self-hosted-ai-starter-kit
+
+# Function to wait for service
+wait_for_service() {
+    local service=$1
+    local max_attempts=30
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if docker ps | grep -q "$service"; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    
+    return 1
+}
+
+# Start base services first
+docker compose up -d postgres redis
+
+# Wait for database to be ready
+echo "Waiting for database..."
+until docker exec postgres pg_isready -U n8n >/dev/null 2>&1; do
+    sleep 1
+done
+
+# Start remaining services
 docker compose up -d
-EOF
+
+# Verify critical services
+for service in postgres redis n8n-main caddy; do
+    if wait_for_service $service; then
+        echo "✓ $service started"
+    else
+        echo "✗ Failed to start $service"
+        exit 1
+    fi
+done
+
+echo "All services started successfully"
+STARTUP_EOF
 chmod +x start.sh
 
 # Create stop script
-cat > stop.sh << EOF
+cat > stop.sh << 'SHUTDOWN_EOF'
 #!/bin/bash
-cd $INSTALL_DIR/self-hosted-ai-starter-kit
+cd /opt/onezipp-n8n/self-hosted-ai-starter-kit
+
+# Stop all services gracefully
 docker compose down
-EOF
+
+# Wait for containers to stop
+sleep 5
+
+# Force stop any remaining containers
+docker ps -a | grep "n8n-" | awk '{print $1}' | xargs -r docker stop 2>/dev/null
+
+echo "All services stopped"
+SHUTDOWN_EOF
 chmod +x stop.sh
 
 # Create systemd service
@@ -899,17 +1175,316 @@ RestartSec=30s
 WantedBy=multi-user.target
 EOF
 
+# Create backup script and configuration
+print_section "Setting up Automatic Backups"
+print_message $YELLOW "🔧 Creating backup script..."
+
+# Create backup directory
+mkdir -p $INSTALL_DIR/backups
+
+# Create backup script
+cat > $INSTALL_DIR/backup-n8n.sh << 'BACKUP_EOF'
+#!/bin/bash
+BACKUP_DIR="/opt/onezipp-n8n/backups"
+DATE=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="$BACKUP_DIR/backup.log"
+INSTALL_DIR="/opt/onezipp-n8n"
+
+mkdir -p $BACKUP_DIR
+
+echo "[$(date)] Starting backup..." >> $LOG_FILE
+
+# Backup n8n data
+docker run --rm -v self-hosted-ai-starter-kit_n8n_storage:/data -v $BACKUP_DIR:/backup alpine tar czf /backup/n8n-backup-$DATE.tar.gz /data 2>> $LOG_FILE
+
+if [ $? -eq 0 ]; then
+    echo "[$(date)] Backup completed: n8n-backup-$DATE.tar.gz" >> $LOG_FILE
+    
+    # Keep only last 7 backups
+    ls -t $BACKUP_DIR/n8n-backup-*.tar.gz | tail -n +8 | xargs -r rm
+    echo "[$(date)] Cleanup completed. Kept last 7 backups." >> $LOG_FILE
+else
+    echo "[$(date)] Backup failed!" >> $LOG_FILE
+fi
+
+# Also backup PostgreSQL
+docker exec postgres pg_dump -U n8n n8n | gzip > $BACKUP_DIR/postgres-backup-$DATE.sql.gz 2>> $LOG_FILE
+
+if [ $? -eq 0 ]; then
+    echo "[$(date)] PostgreSQL backup completed: postgres-backup-$DATE.sql.gz" >> $LOG_FILE
+    
+    # Keep only last 7 PostgreSQL backups
+    ls -t $BACKUP_DIR/postgres-backup-*.sql.gz | tail -n +8 | xargs -r rm
+else
+    echo "[$(date)] PostgreSQL backup failed!" >> $LOG_FILE
+fi
+
+# Backup configurations
+CONFIG_BACKUP_DIR="$BACKUP_DIR/configs-$DATE"
+mkdir -p "$CONFIG_BACKUP_DIR"
+cp "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" "$CONFIG_BACKUP_DIR/" 2>/dev/null
+cp "$INSTALL_DIR/self-hosted-ai-starter-kit/docker-compose.yml" "$CONFIG_BACKUP_DIR/" 2>/dev/null
+cp -r "$INSTALL_DIR/self-hosted-ai-starter-kit/caddy" "$CONFIG_BACKUP_DIR/" 2>/dev/null
+cp "$INSTALL_DIR/config-summary.txt" "$CONFIG_BACKUP_DIR/" 2>/dev/null
+
+# Create a tarball of configs
+tar czf "$BACKUP_DIR/configs-backup-$DATE.tar.gz" -C "$BACKUP_DIR" "configs-$DATE" 2>> $LOG_FILE
+rm -rf "$CONFIG_BACKUP_DIR"
+
+# GitHub backup if configured
+if [ -f "$INSTALL_DIR/.github-token.enc" ] && [ -f "$INSTALL_DIR/.github-repo" ]; then
+    echo "[$(date)] Starting GitHub backup..." >> $LOG_FILE
+    
+    # Decrypt token (using domain and encryption key as password)
+    DOMAIN=$(grep "^DOMAIN=" "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" | cut -d'=' -f2)
+    ENCRYPTION_KEY=$(grep "^N8N_ENCRYPTION_KEY=" "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" | cut -d'=' -f2)
+    GITHUB_TOKEN=$(openssl enc -aes-256-cbc -d -in "$INSTALL_DIR/.github-token.enc" -k "${DOMAIN}${ENCRYPTION_KEY}" 2>/dev/null)
+    GITHUB_REPO=$(cat "$INSTALL_DIR/.github-repo")
+    
+    if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_REPO" ]; then
+        # Create temp directory for git operations
+        TEMP_GIT_DIR=$(mktemp -d)
+        cd "$TEMP_GIT_DIR"
+        
+        # Clone or create repo
+        git clone "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git" backup-repo 2>> $LOG_FILE || {
+            mkdir backup-repo
+            cd backup-repo
+            git init
+            git remote add origin "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+            cd ..
+        }
+        
+        cd backup-repo
+        
+        # Create backup structure
+        mkdir -p "$(hostname)/$(date +%Y-%m)"
+        
+        # Copy backups
+        cp "$BACKUP_DIR/n8n-backup-$DATE.tar.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
+        cp "$BACKUP_DIR/postgres-backup-$DATE.sql.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
+        cp "$BACKUP_DIR/configs-backup-$DATE.tar.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
+        
+        # Create backup manifest
+        cat > "$(hostname)/$(date +%Y-%m)/backup-manifest-$DATE.txt" << MANIFEST
+Backup Date: $(date)
+Hostname: $(hostname)
+Domain: $DOMAIN
+N8N Version: $(docker exec n8n-main n8n --version 2>/dev/null || echo "unknown")
+Worker Count: $(docker ps --filter "name=n8n-worker" -q | wc -l)
+Webhook Count: $(docker ps --filter "name=n8n-webhook" -q | wc -l)
+
+Files:
+- n8n-backup-$DATE.tar.gz
+- postgres-backup-$DATE.sql.gz
+- configs-backup-$DATE.tar.gz
+MANIFEST
+        
+        # Commit and push
+        git config user.email "backup@$(hostname)"
+        git config user.name "N8N Backup Bot"
+        git add .
+        git commit -m "Backup from $(hostname) - $DATE" >> $LOG_FILE 2>&1
+        git push origin main >> $LOG_FILE 2>&1
+        
+        if [ $? -eq 0 ]; then
+            echo "[$(date)] GitHub backup completed successfully" >> $LOG_FILE
+        else
+            echo "[$(date)] GitHub backup push failed" >> $LOG_FILE
+        fi
+        
+        # Cleanup
+        cd /
+        rm -rf "$TEMP_GIT_DIR"
+    else
+        echo "[$(date)] GitHub backup skipped - token decryption failed" >> $LOG_FILE
+    fi
+fi
+
+echo "[$(date)] Backup process finished." >> $LOG_FILE
+echo "----------------------------------------" >> $LOG_FILE
+BACKUP_EOF
+
+chmod +x $INSTALL_DIR/backup-n8n.sh
+
+# Create restore script
+cat > $INSTALL_DIR/restore-n8n.sh << 'RESTORE_EOF'
+#!/bin/bash
+BACKUP_DIR="/opt/onezipp-n8n/backups"
+INSTALL_DIR="/opt/onezipp-n8n"
+
+# Function to list GitHub backups
+list_github_backups() {
+    if [ -f "$INSTALL_DIR/.github-token.enc" ] && [ -f "$INSTALL_DIR/.github-repo" ]; then
+        # Decrypt token
+        DOMAIN=$(grep "^DOMAIN=" "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" | cut -d'=' -f2)
+        ENCRYPTION_KEY=$(grep "^N8N_ENCRYPTION_KEY=" "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" | cut -d'=' -f2)
+        GITHUB_TOKEN=$(openssl enc -aes-256-cbc -d -in "$INSTALL_DIR/.github-token.enc" -k "${DOMAIN}${ENCRYPTION_KEY}" 2>/dev/null)
+        GITHUB_REPO=$(cat "$INSTALL_DIR/.github-repo")
+        
+        if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_REPO" ]; then
+            echo "GitHub backups available:"
+            TEMP_DIR=$(mktemp -d)
+            cd "$TEMP_DIR"
+            git clone -q "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git" backup-repo 2>/dev/null
+            if [ -d "backup-repo/$(hostname)" ]; then
+                find "backup-repo/$(hostname)" -name "backup-manifest-*.txt" | while read manifest; do
+                    echo "  - $(basename $(dirname "$manifest"))/$(basename "$manifest" .txt | sed 's/backup-manifest-//')"
+                done
+            fi
+            rm -rf "$TEMP_DIR"
+        fi
+    fi
+}
+
+# Check arguments
+if [ -z "$1" ]; then
+    echo "Usage: $0 <backup-date> [--from-github]"
+    echo ""
+    echo "Local backups:"
+    ls -la $BACKUP_DIR/n8n-backup-*.tar.gz 2>/dev/null | awk '{print "  - " $9}' | sed 's/.*n8n-backup-//' | sed 's/.tar.gz//'
+    echo ""
+    list_github_backups
+    exit 1
+fi
+
+BACKUP_DATE=$1
+FROM_GITHUB=false
+if [ "$2" = "--from-github" ]; then
+    FROM_GITHUB=true
+fi
+
+# Handle GitHub restore
+if $FROM_GITHUB; then
+    if [ -f "$INSTALL_DIR/.github-token.enc" ] && [ -f "$INSTALL_DIR/.github-repo" ]; then
+        # Decrypt token and clone
+        DOMAIN=$(grep "^DOMAIN=" "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" | cut -d'=' -f2)
+        ENCRYPTION_KEY=$(grep "^N8N_ENCRYPTION_KEY=" "$INSTALL_DIR/self-hosted-ai-starter-kit/.env" | cut -d'=' -f2)
+        GITHUB_TOKEN=$(openssl enc -aes-256-cbc -d -in "$INSTALL_DIR/.github-token.enc" -k "${DOMAIN}${ENCRYPTION_KEY}" 2>/dev/null)
+        GITHUB_REPO=$(cat "$INSTALL_DIR/.github-repo")
+        
+        TEMP_DIR=$(mktemp -d)
+        cd "$TEMP_DIR"
+        echo "Fetching backup from GitHub..."
+        git clone -q "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git" backup-repo 2>/dev/null
+        
+        # Find backup files
+        YEAR_MONTH=$(echo $BACKUP_DATE | cut -c1-7)
+        BACKUP_PATH="backup-repo/$(hostname)/$YEAR_MONTH"
+        
+        if [ -d "$BACKUP_PATH" ]; then
+            cp "$BACKUP_PATH"/*-backup-$BACKUP_DATE.* "$BACKUP_DIR/" 2>/dev/null
+            echo "Downloaded backups from GitHub"
+        else
+            echo "Error: Backup not found in GitHub repository"
+            rm -rf "$TEMP_DIR"
+            exit 1
+        fi
+        
+        rm -rf "$TEMP_DIR"
+    else
+        echo "Error: GitHub backup not configured"
+        exit 1
+    fi
+fi
+
+N8N_BACKUP="$BACKUP_DIR/n8n-backup-$BACKUP_DATE.tar.gz"
+PG_BACKUP="$BACKUP_DIR/postgres-backup-$BACKUP_DATE.sql.gz"
+
+if [ ! -f "$N8N_BACKUP" ]; then
+    echo "Error: Backup file $N8N_BACKUP not found!"
+    exit 1
+fi
+
+echo "Restoring from backup: $BACKUP_DATE"
+read -p "This will overwrite current data. Continue? (y/N) " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+fi
+
+# Stop all n8n services
+cd /opt/onezipp-n8n/self-hosted-ai-starter-kit
+echo "Stopping n8n services..."
+docker compose stop $(docker compose ps --services | grep -E "n8n-main|n8n-worker|n8n-webhook")
+
+# Restore n8n data
+echo "Restoring n8n data..."
+docker run --rm -v self-hosted-ai-starter-kit_n8n_storage:/data -v $BACKUP_DIR:/backup alpine sh -c "rm -rf /data/* && tar xzf /backup/n8n-backup-$BACKUP_DATE.tar.gz -C /"
+
+# Restore PostgreSQL if backup exists
+if [ -f "$PG_BACKUP" ]; then
+    echo "Restoring PostgreSQL data..."
+    gunzip < $PG_BACKUP | docker exec -i postgres psql -U n8n n8n
+fi
+
+# Restore configuration if exists
+CONFIG_BACKUP="$BACKUP_DIR/configs-backup-$BACKUP_DATE.tar.gz"
+if [ -f "$CONFIG_BACKUP" ]; then
+    echo "Restoring configuration files..."
+    TEMP_RESTORE=$(mktemp -d)
+    tar xzf "$CONFIG_BACKUP" -C "$TEMP_RESTORE"
+    
+    # Ask before overwriting config
+    read -p "Restore configuration files (.env, docker-compose.yml)? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        cp "$TEMP_RESTORE/configs-$BACKUP_DATE/.env" ./ 2>/dev/null
+        cp "$TEMP_RESTORE/configs-$BACKUP_DATE/docker-compose.yml" ./ 2>/dev/null
+        cp -r "$TEMP_RESTORE/configs-$BACKUP_DATE/caddy" ./ 2>/dev/null
+    fi
+    
+    rm -rf "$TEMP_RESTORE"
+fi
+
+# Start services
+echo "Starting services..."
+docker compose up -d
+
+echo "Restore completed!"
+echo "Please wait a few moments for all services to start."
+RESTORE_EOF
+
+chmod +x $INSTALL_DIR/restore-n8n.sh
+
+# Add to cron for daily backups at 2 AM
+print_message $YELLOW "📅 Setting up daily automatic backups..."
+(crontab -l 2>/dev/null | grep -v "backup-n8n.sh"; echo "0 2 * * * $INSTALL_DIR/backup-n8n.sh") | crontab -
+
+# Run initial backup
+print_message $YELLOW "💾 Running initial backup..."
+$INSTALL_DIR/backup-n8n.sh
+
+print_message $GREEN "✅ Backup system configured!"
+print_message $BLUE "   Backups run daily at 2 AM"
+print_message $BLUE "   Backup location: $INSTALL_DIR/backups"
+print_message $BLUE "   Manual backup: $INSTALL_DIR/backup-n8n.sh"
+print_message $BLUE "   Restore backup: $INSTALL_DIR/restore-n8n.sh <date>"
+
 # Configure firewall
 print_section "Configuring Firewall"
 if command_exists ufw; then
     print_message $YELLOW "🔥 Configuring UFW firewall..."
     ufw --force enable
-    ufw allow 22/tcp
-    ufw allow 80/tcp
-    ufw allow 443/tcp
+    
+    # Define required ports
+    FIREWALL_PORTS=(
+        "22/tcp"    # SSH
+        "80/tcp"    # HTTP
+        "443/tcp"   # HTTPS
+    )
+    
+    # Open ports using loop
+    for port in "${FIREWALL_PORTS[@]}"; do
+        print_message $YELLOW "   Opening port $port..."
+        ufw allow $port
+    done
+    
     ufw reload
+    print_message $GREEN "✅ Firewall configured"
 else
     print_message $YELLOW "⚠️  UFW not found. Please configure your firewall manually."
+    print_message $YELLOW "   Required ports: 22 (SSH), 80 (HTTP), 443 (HTTPS)"
 fi
 
 # Start services
@@ -924,6 +1499,7 @@ if ! docker compose up -d; then
     print_message $RED "❌ Initial startup failed. Attempting fixes..."
     fix_gpu_config
     fix_webhook_urls
+    fix_caddy_ports
     docker compose up -d
 fi
 
@@ -934,12 +1510,31 @@ sleep 45
 # Check for issues and auto-fix
 fix_container_restarts
 fix_webhook_urls
+fix_caddy_ports
 
 # Check service status
 print_section "Service Status Check"
-SERVICES=("caddy" "postgres" "redis" "n8n-main" "n8n-worker-1" "n8n-worker-2" "n8n-worker-3" "n8n-worker-4" "n8n-webhook-1" "n8n-webhook-2" "n8n-webhook-3" "n8n-webhook-4" "ollama" "qdrant")
 
-for service in "${SERVICES[@]}"; do
+# Base services array
+BASE_SERVICES=("caddy" "postgres" "redis" "n8n-main" "ollama" "qdrant")
+
+# Add worker services using loop
+WORKER_SERVICES=()
+for i in $(seq 1 $WORKER_COUNT); do
+    WORKER_SERVICES+=("n8n-worker-$i")
+done
+
+# Add webhook services using loop
+WEBHOOK_SERVICES=()
+for i in $(seq 1 $WEBHOOK_COUNT); do
+    WEBHOOK_SERVICES+=("n8n-webhook-$i")
+done
+
+# Combine all services
+ALL_SERVICES=("${BASE_SERVICES[@]}" "${WORKER_SERVICES[@]}" "${WEBHOOK_SERVICES[@]}")
+
+# Check status for all services
+for service in "${ALL_SERVICES[@]}"; do
     if docker ps | grep -q $service; then
         print_message $GREEN "✅ $service is running"
     else
@@ -967,6 +1562,8 @@ N8N Encryption Key: ${N8N_ENCRYPTION_KEY}
 N8N JWT Secret: ${N8N_JWT_SECRET}
 
 GPU Profile: ${GPU_PROFILE}
+Worker Nodes: ${WORKER_COUNT}
+Webhook Nodes: ${WEBHOOK_COUNT}
 
 Service URLs:
 - N8N UI: https://${DOMAIN}
@@ -979,16 +1576,33 @@ Commands:
 - Stop services: systemctl stop onezipp-n8n
 - View logs: docker compose -f $INSTALL_DIR/self-hosted-ai-starter-kit/docker-compose.yml logs -f
 - Restart services: systemctl restart onezipp-n8n
+
+Backup Configuration:
+- Manual backup: $INSTALL_DIR/backup-n8n.sh
+- Restore backup: $INSTALL_DIR/restore-n8n.sh <date>
+- Backup location: $INSTALL_DIR/backups
+- Automatic backups: Daily at 2 AM via cron
 EOF
 
+# Add GitHub backup info if enabled
+if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
+    cat >> $INSTALL_DIR/config-summary.txt << EOF
+- GitHub backup enabled: ${GITHUB_BACKUP_REPO}
+- Restore from GitHub: $INSTALL_DIR/restore-n8n.sh <date> --from-github
+EOF
+fi
+
 # Final check and push any fixes
-if docker ps | grep -E "n8n-worker|n8n-webhook" | grep -q "Restarting"; then
+if docker ps | grep -E "n8n-" | grep -q "Restarting"; then
     print_message $YELLOW "⚠️  Some services are still restarting. Running final fixes..."
     fix_container_restarts
 fi
 
-# Also check for deprecated webhook variables
+# Run all fix checks
 fix_webhook_urls
+fix_caddy_ports
+fix_encryption_key
+fix_postgres_password
 
 # Push final state to git
 push_fix_to_git "Installation completed with all fixes applied"
@@ -1014,23 +1628,42 @@ echo -e "   Stop services: ${GREEN}systemctl stop onezipp-n8n${NC}"
 echo -e "   View logs: ${GREEN}cd $INSTALL_DIR/self-hosted-ai-starter-kit && docker compose logs -f${NC}"
 echo -e "   Restart: ${GREEN}systemctl restart onezipp-n8n${NC}"
 echo ""
+echo -e "${YELLOW}💾 Backup Commands:${NC}"
+echo -e "   Manual backup: ${GREEN}$INSTALL_DIR/backup-n8n.sh${NC}"
+echo -e "   Restore backup: ${GREEN}$INSTALL_DIR/restore-n8n.sh <date>${NC}"
+if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
+    echo -e "   Restore from GitHub: ${GREEN}$INSTALL_DIR/restore-n8n.sh <date> --from-github${NC}"
+fi
+echo -e "   View backups: ${GREEN}ls -la $INSTALL_DIR/backups/${NC}"
+if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
+    echo -e "   GitHub backup: ${GREEN}Enabled to ${GITHUB_BACKUP_REPO}${NC}"
+fi
+echo ""
 echo -e "${YELLOW}📁 Configuration saved to:${NC}"
 echo -e "   ${GREEN}$INSTALL_DIR/config-summary.txt${NC}"
 echo ""
 echo -e "${BLUE}🚀 Your N8N cluster is now running with:${NC}"
 echo -e "   • 1 Main N8N instance (UI/API)"
-echo -e "   • 4 Worker nodes for processing"
-echo -e "   • 4 Webhook processor nodes"
+echo -e "   • ${WORKER_COUNT} Worker nodes for processing"
+echo -e "   • ${WEBHOOK_COUNT} Webhook processor nodes"
 echo -e "   • Redis for queue management"
 echo -e "   • PostgreSQL database"
 echo -e "   • Caddy with automatic SSL"
 echo -e "   • Ollama for AI models"
 echo -e "   • Qdrant vector database"
+echo -e "   • Automatic daily backups at 2 AM"
+if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
+    echo -e "   • GitHub backup integration"
+fi
 echo ""
 print_message $YELLOW "⚠️  Note: It may take a few minutes for SSL certificates to be issued."
 print_message $YELLOW "   If you can't access the site immediately, please wait 2-3 minutes."
 print_message $YELLOW "   Webhooks will automatically use: https://${DOMAIN}/webhook/..."
 echo ""
+print_message $BLUE "💾 Important: Your workflows are automatically backed up daily at 2 AM"
+print_message $BLUE "   You can also run manual backups anytime with: $INSTALL_DIR/backup-n8n.sh"
+echo ""
 print_message $GREEN "🎊 Thank you for using Onezipp N8N Cluster Script!"
 print_message $BLUE "   GitHub: https://github.com/PratikMoitra/onezipp-n8n-cluster"
 print_message $BLUE "   Auto-fix enabled: Errors are automatically fixed and pushed to git"
+print_message $YELLOW "   💡 Tip: Fork the repo and update GIT_REMOTE in the script to use your own repository!"
