@@ -85,44 +85,35 @@ push_fix_to_git() {
 
 # Function to fix worker/webhook command issues
 fix_worker_commands() {
-    print_message $YELLOW "🔧 Fixing worker/webhook commands..."
+    print_message $YELLOW "🔧 Fixing worker/webhook configurations..."
     
     cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
     
-    # Try different command formats - fixed the typo in the first format
-    local command_formats=('["worker"]' "worker" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "worker"]')
-    local webhook_formats=('["webhook"]' "webhook" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "webhook"]')
-    
-    for i in "${!command_formats[@]}"; do
-        local cmd="${command_formats[$i]}"
-        print_message $YELLOW "Testing command format: $cmd"
+    # Check if workers are using the old command format
+    if grep -q "command: worker" docker-compose.yml || grep -q "command: webhook" docker-compose.yml; then
+        print_message $YELLOW "Updating to environment-based configuration..."
         
-        # Update docker-compose.yml for one worker
-        sed -i "/n8n-worker-1:/,/volumes:/ s/command: .*/command: $cmd/" docker-compose.yml
+        # Remove command lines from workers and webhooks
+        sed -i '/n8n-worker-[1-4]:/,/volumes:/ { /command:/d; }' docker-compose.yml
+        sed -i '/n8n-webhook-[1-4]:/,/volumes:/ { /command:/d; }' docker-compose.yml
         
-        # Test with one worker
-        docker compose up -d n8n-worker-1
-        sleep 10
+        # Add EXECUTIONS_PROCESS environment variable for workers
+        for i in {1..4}; do
+            sed -i "/n8n-worker-$i:/,/volumes:/ {
+                /environment:/a\      - EXECUTIONS_PROCESS=worker\n      - N8N_DISABLE_UI=true\n      - N8N_DISABLE_EDITOR=true
+            }" docker-compose.yml
+        done
         
-        # Check if it's running
-        if docker ps | grep -q "n8n-worker-1" && ! docker ps | grep "Restarting" | grep -q "n8n-worker-1"; then
-            print_message $GREEN "✅ Found working command format: $cmd"
-            
-            # Apply to all workers
-            for j in {1..4}; do
-                sed -i "/n8n-worker-$j:/,/volumes:/ s/command: .*/command: $cmd/" docker-compose.yml
-            done
-            
-            # Apply webhook command
-            local webhook_cmd="${webhook_formats[$i]}"
-            for j in {1..4}; do
-                sed -i "/n8n-webhook-$j:/,/volumes:/ s/command: .*/command: $webhook_cmd/" docker-compose.yml
-            done
-            
-            push_fix_to_git "Fixed worker/webhook command format to: $cmd"
-            return 0
-        fi
-    done
+        # Add EXECUTIONS_PROCESS environment variable for webhooks
+        for i in {1..4}; do
+            sed -i "/n8n-webhook-$i:/,/volumes:/ {
+                /hostname:/a\    environment:\n      - EXECUTIONS_MODE=\${EXECUTIONS_MODE}\n      - QUEUE_BULL_REDIS_HOST=\${QUEUE_BULL_REDIS_HOST}\n      - QUEUE_BULL_REDIS_PORT=\${QUEUE_BULL_REDIS_PORT}\n      - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}\n      - N8N_DISABLE_UI=true\n      - N8N_DISABLE_EDITOR=true\n      - EXECUTIONS_PROCESS=webhook
+            }" docker-compose.yml
+        done
+        
+        push_fix_to_git "Fixed worker/webhook configuration to use environment variables"
+        return 0
+    fi
     
     return 1
 }
@@ -426,6 +417,7 @@ N8N_DEFAULT_BINARY_DATA_MODE=filesystem
 N8N_BASIC_AUTH_ACTIVE=true
 N8N_BASIC_AUTH_USER=${N8N_ADMIN_EMAIL}
 N8N_BASIC_AUTH_PASSWORD=${N8N_ADMIN_PASSWORD}
+N8N_RUNNERS_ENABLED=true
 
 # Domain Configuration
 DOMAIN=${DOMAIN}
@@ -440,6 +432,9 @@ QUEUE_HEALTH_CHECK_ACTIVE=true
 
 # Worker Configuration
 N8N_CONCURRENCY=10
+
+# Task Runners Configuration
+N8N_RUNNERS_ENABLED=true
 
 # Webhook and URL Configuration
 WEBHOOK_URL=https://${DOMAIN}
@@ -536,6 +531,7 @@ x-n8n-base: &n8n-base
     - N8N_PERSONALIZATION_ENABLED=false
     - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
     - N8N_USER_MANAGEMENT_JWT_SECRET=${N8N_USER_MANAGEMENT_JWT_SECRET}
+    - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
     - EXECUTIONS_MODE=${EXECUTIONS_MODE}
     - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
     - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
@@ -619,15 +615,25 @@ services:
       - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE}
       - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
       - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
 
   # N8N Worker Nodes
   n8n-worker-1:
     <<: *n8n-base
     container_name: n8n-worker-1
     hostname: n8n-worker-1
-    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=worker
     volumes:
       - ./shared:/data/shared
 
@@ -635,9 +641,15 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-2
     hostname: n8n-worker-2
-    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=worker
     volumes:
       - ./shared:/data/shared
 
@@ -645,9 +657,15 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-3
     hostname: n8n-worker-3
-    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=worker
     volumes:
       - ./shared:/data/shared
 
@@ -655,9 +673,15 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-4
     hostname: n8n-worker-4
-    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=worker
     volumes:
       - ./shared:/data/shared
 
@@ -666,7 +690,14 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-1
     hostname: n8n-webhook-1
-    command: webhook
+    environment:
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=webhook
     volumes:
       - ./shared:/data/shared
 
@@ -674,7 +705,14 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-2
     hostname: n8n-webhook-2
-    command: webhook
+    environment:
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=webhook
     volumes:
       - ./shared:/data/shared
 
@@ -682,7 +720,14 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-3
     hostname: n8n-webhook-3
-    command: webhook
+    environment:
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=webhook
     volumes:
       - ./shared:/data/shared
 
@@ -690,7 +735,14 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-4
     hostname: n8n-webhook-4
-    command: webhook
+    environment:
+      - EXECUTIONS_MODE=${EXECUTIONS_MODE}
+      - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_DISABLE_UI=true
+      - N8N_DISABLE_EDITOR=true
+      - EXECUTIONS_PROCESS=webhook
     volumes:
       - ./shared:/data/shared
 
