@@ -266,9 +266,18 @@ QUEUE_HEALTH_CHECK_ACTIVE=true
 # Worker Configuration
 N8N_CONCURRENCY=10
 
-# Webhook Configuration
+# Webhook and URL Configuration
 WEBHOOK_URL=https://${DOMAIN}
 N8N_WEBHOOK_BASE_URL=https://${DOMAIN}
+N8N_EDITOR_BASE_URL=https://${DOMAIN}
+N8N_HOST=${DOMAIN}
+N8N_PROTOCOL=https
+N8N_PORT=443
+N8N_WEBHOOK_URL=https://${DOMAIN}
+N8N_WEBHOOK_TUNNEL_URL=https://${DOMAIN}
+
+# GPU Profile
+GPU_PROFILE=${GPU_PROFILE}
 EOF
 
 # Create Caddyfile
@@ -336,9 +345,7 @@ EOF
 
 # Create custom docker-compose file
 print_message $YELLOW "📝 Creating docker-compose.yml..."
-cat > docker-compose.yml << 'EOF'
-version: '3.8'
-
+cat > docker-compose.yml << 'DOCKERCOMPOSE_EOF'
 x-n8n-base: &n8n-base
   image: n8nio/n8n:latest
   networks: ['n8n-network']
@@ -359,6 +366,13 @@ x-n8n-base: &n8n-base
     - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
     - N8N_WEBHOOK_BASE_URL=${N8N_WEBHOOK_BASE_URL}
     - WEBHOOK_URL=${WEBHOOK_URL}
+    - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
+    - N8N_HOST=${N8N_HOST}
+    - N8N_PROTOCOL=${N8N_PROTOCOL}
+    - N8N_PORT=${N8N_PORT}
+    - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
+    - N8N_WEBHOOK_TUNNEL_URL=${N8N_WEBHOOK_TUNNEL_URL}
+    - OLLAMA_HOST=ollama:11434
   depends_on:
     postgres:
       condition: service_healthy
@@ -434,7 +448,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-1
     hostname: n8n-worker-1
-    command: n8n worker
+    command: ["worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -444,7 +458,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-2
     hostname: n8n-worker-2
-    command: n8n worker
+    command: ["worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -454,7 +468,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-3
     hostname: n8n-worker-3
-    command: n8n worker
+    command: ["worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -464,7 +478,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-4
     hostname: n8n-worker-4
-    command: n8n worker
+    command: ["worker"]
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -475,7 +489,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-1
     hostname: n8n-webhook-1
-    command: n8n webhook
+    command: ["webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -483,7 +497,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-2
     hostname: n8n-webhook-2
-    command: n8n webhook
+    command: ["webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -491,7 +505,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-3
     hostname: n8n-webhook-3
-    command: n8n webhook
+    command: ["webhook"]
     volumes:
       - ./shared:/data/shared
 
@@ -499,11 +513,11 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-4
     hostname: n8n-webhook-4
-    command: n8n webhook
+    command: ["webhook"]
     volumes:
       - ./shared:/data/shared
 
-  # AI Components
+  # Ollama AI Model Server
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -513,7 +527,8 @@ services:
       - "11434:11434"
     volumes:
       - ollama_storage:/root/.ollama
-    profiles: ['${GPU_PROFILE}', 'cpu']
+    environment:
+      - OLLAMA_HOST=0.0.0.0
     deploy:
       resources:
         reservations:
@@ -521,17 +536,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
-  ollama-cpu:
-    image: ollama/ollama:latest
-    container_name: ollama
-    networks: ['n8n-network']
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_storage:/root/.ollama
-    profiles: ['cpu']
+        limits:
+          memory: 4G
 
   # Ollama model puller
   ollama-pull:
@@ -540,13 +546,14 @@ services:
     container_name: ollama-pull
     volumes:
       - ollama_storage:/root/.ollama
+    environment:
+      - OLLAMA_HOST=ollama:11434
     entrypoint: /bin/sh
     command:
       - "-c"
-      - "sleep 5 && ollama pull llama3.2 && ollama pull nomic-embed-text"
+      - "sleep 10 && ollama pull llama3.2 && ollama pull nomic-embed-text"
     depends_on:
       - ollama
-    profiles: ['${GPU_PROFILE}', 'cpu']
 
   # Qdrant Vector Database
   qdrant:
@@ -571,14 +578,14 @@ volumes:
 networks:
   n8n-network:
     driver: bridge
-EOF
+DOCKERCOMPOSE_EOF
 
 # Create startup script
 print_message $YELLOW "📝 Creating startup script..."
 cat > start.sh << EOF
 #!/bin/bash
 cd $INSTALL_DIR/self-hosted-ai-starter-kit
-docker compose --profile ${GPU_PROFILE} up -d
+docker compose up -d
 EOF
 chmod +x start.sh
 
@@ -586,7 +593,7 @@ chmod +x start.sh
 cat > stop.sh << EOF
 #!/bin/bash
 cd $INSTALL_DIR/self-hosted-ai-starter-kit
-docker compose --profile ${GPU_PROFILE} down
+docker compose down
 EOF
 chmod +x stop.sh
 
@@ -632,11 +639,11 @@ print_message $YELLOW "🚀 Starting Onezipp N8N Cluster..."
 systemctl daemon-reload
 systemctl enable onezipp-n8n.service
 cd $INSTALL_DIR/self-hosted-ai-starter-kit
-docker compose --profile ${GPU_PROFILE} up -d
+docker compose up -d
 
 # Wait for services to be ready
 print_message $YELLOW "⏳ Waiting for services to start..."
-sleep 30
+sleep 45
 
 # Check service status
 print_section "Service Status Check"
@@ -662,7 +669,7 @@ Domain: ${DOMAIN}
 SSL Email: ${EMAIL}
 
 N8N Admin Email: ${N8N_ADMIN_EMAIL}
-N8N Admin Password: [HIDDEN]
+N8N Admin Password: ${N8N_ADMIN_PASSWORD}
 
 PostgreSQL Password: ${POSTGRES_PASSWORD}
 Redis Password: ${REDIS_PASSWORD}
@@ -720,4 +727,4 @@ print_message $YELLOW "⚠️  Note: It may take a few minutes for SSL certifica
 print_message $YELLOW "   If you can't access the site immediately, please wait 2-3 minutes."
 echo ""
 print_message $GREEN "🎊 Thank you for using Onezipp N8N Cluster Script!"
-print_message $BLUE "   GitHub: https://github.com/yourusername/onezipp-n8n-cluster"
+print_message $BLUE "   GitHub: https://github.com/PratikMoitra/onezipp-n8n-cluster"
