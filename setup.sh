@@ -89,8 +89,8 @@ fix_worker_commands() {
     
     cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
     
-    # Try different command formats
-    local command_formats=('[worker"]' "worker" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "worker"]')
+    # Try different command formats - fixed the typo in the first format
+    local command_formats=('["worker"]' "worker" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "worker"]')
     local webhook_formats=('["webhook"]' "webhook" '["node", "/usr/local/lib/node_modules/n8n/bin/n8n", "webhook"]')
     
     for i in "${!command_formats[@]}"; do
@@ -625,7 +625,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-1
     hostname: n8n-worker-1
-    command: ["worker"]
+    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -635,7 +635,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-2
     hostname: n8n-worker-2
-    command: ["worker"]
+    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -645,7 +645,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-3
     hostname: n8n-worker-3
-    command: ["worker"]
+    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -655,7 +655,7 @@ services:
     <<: *n8n-base
     container_name: n8n-worker-4
     hostname: n8n-worker-4
-    command: ["worker"]
+    command: worker
     environment:
       - N8N_CONCURRENCY=${N8N_CONCURRENCY}
     volumes:
@@ -666,7 +666,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-1
     hostname: n8n-webhook-1
-    command: ["webhook"]
+    command: webhook
     volumes:
       - ./shared:/data/shared
 
@@ -674,7 +674,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-2
     hostname: n8n-webhook-2
-    command: ["webhook"]
+    command: webhook
     volumes:
       - ./shared:/data/shared
 
@@ -682,7 +682,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-3
     hostname: n8n-webhook-3
-    command: ["webhook"]
+    command: webhook
     volumes:
       - ./shared:/data/shared
 
@@ -690,7 +690,7 @@ services:
     <<: *n8n-base
     container_name: n8n-webhook-4
     hostname: n8n-webhook-4
-    command: ["webhook"]
+    command: webhook
     volumes:
       - ./shared:/data/shared
 
