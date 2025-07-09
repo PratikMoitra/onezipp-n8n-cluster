@@ -70,3 +70,6 @@ tests/
 *.tar.gz
 *.tar
 *.gz
+setup.sh.bak
+# BackupFiles
+*.bak
