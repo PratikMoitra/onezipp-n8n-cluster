@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# Onezipp N8N Cluster Setup Script v2.0
+# Onezipp N8N Cluster Setup Script v2.1
 # Sets up a production-ready n8n instance with clustering, SSL, backups, and AI capabilities
-# Features: Dynamic worker/webhook scaling, automatic fixes, GitHub backup integration
+# Features: Dynamic worker/webhook scaling, automatic fixes, GitHub backup integration, binary data sharing
 # Repository: https://github.com/PratikMoitra/onezipp-n8n-cluster
+# Updated: Reflects current docker-compose.yml structure with proper binary data sharing
 
 # =============================================================================
 # Onezipp N8N Cluster Script - Production Ready Setup with Auto-Fix & Backup
@@ -14,6 +15,8 @@
 # - Redis for queue management
 # - PostgreSQL database
 # - Ollama, Qdrant for AI capabilities
+# - FIXED: Proper binary data sharing across cluster nodes
+# - FIXED: Image preview support with correct volume mounting
 # - AUTO-FIX: Automatically fixes common errors and pushes to git
 #   - Worker/webhook command issues
 #   - GPU configuration problems
@@ -21,12 +24,14 @@
 #   - Caddy port mismatches
 #   - PostgreSQL password issues
 #   - Encryption key mismatches
+#   - Binary data directory creation
 # - BACKUP: Automatic daily backups with easy restore capability
 #   - Local backups with rotation (keeps last 7)
 #   - Optional GitHub backup integration with encrypted token
 #   - Configuration backups included
 # - Fixed webhook URLs to use your domain instead of localhost
 # - Optimized docker-compose with dynamic service generation
+# - Proper volume mounting: shared_data for binary data, n8n_storage only for main
 # - Uses loops for efficient configuration and management
 # =============================================================================
 
@@ -45,8 +50,8 @@ GIT_REMOTE="https://github.com/PratikMoitra/onezipp-n8n-cluster.git"
 SUMMARY_SHOWN=""
 
 # Default values for worker and webhook counts
-WORKER_COUNT=4
-WEBHOOK_COUNT=4
+WORKER_COUNT=6
+WEBHOOK_COUNT=6
 
 # GitHub backup defaults
 ENABLE_GITHUB_BACKUP="N"
@@ -58,7 +63,7 @@ echo -e "${BLUE}"
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║                                                              ║"
 echo "║           🚀 Onezipp N8N Cluster Setup Script 🚀            ║"
-echo "║        with Auto-Fix, Backup & Dynamic Configuration         ║"
+echo "║         v2.1 with Binary Data Fix & Image Preview           ║"
 echo "║     Production-Ready N8N with AI Starter Kit & Caddy        ║"
 echo "║                                                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
@@ -125,38 +130,64 @@ fix_worker_commands() {
     
     cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
     
-    # Check if workers are using the old command format
-    if grep -q "command: worker" docker-compose.yml || grep -q "command: webhook" docker-compose.yml; then
-        print_message $YELLOW "Updating to environment-based configuration..."
+    # Check if workers are using the old environment-based format
+    if grep -q "EXECUTIONS_PROCESS=worker" docker-compose.yml; then
+        print_message $YELLOW "Updating to command-based worker configuration..."
         
         # Get current worker and webhook counts
         local current_workers=$(grep -c "n8n-worker-" docker-compose.yml)
         local current_webhooks=$(grep -c "n8n-webhook-" docker-compose.yml)
         
-        # Remove command lines from workers and webhooks using loops
+        # Update workers to use command instead of EXECUTIONS_PROCESS
         for i in $(seq 1 $current_workers); do
-            sed -i "/n8n-worker-$i:/,/volumes:/ { /command:/d; }" docker-compose.yml
-        done
-        
-        for i in $(seq 1 $current_webhooks); do
-            sed -i "/n8n-webhook-$i:/,/volumes:/ { /command:/d; }" docker-compose.yml
-        done
-        
-        # Add EXECUTIONS_PROCESS environment variable for workers
-        for i in $(seq 1 $current_workers); do
-            sed -i "/n8n-worker-$i:/,/volumes:/ {
-                /environment:/a\      - EXECUTIONS_PROCESS=worker\n      - N8N_DISABLE_UI=true\n      - N8N_DISABLE_EDITOR=true
+            sed -i "/n8n-worker-$i:/,/restart: unless-stopped/ {
+                /EXECUTIONS_PROCESS=worker/d
+                /N8N_DISABLE_UI=true/d
+                /N8N_DISABLE_EDITOR=true/d
             }" docker-compose.yml
+            
+            # Add command: worker if not present
+            if ! grep -A 5 "n8n-worker-$i:" docker-compose.yml | grep -q "command: worker"; then
+                sed -i "/n8n-worker-$i:/a\\    command: worker" docker-compose.yml
+            fi
         done
         
-        # Add EXECUTIONS_PROCESS environment variable for webhooks
+        # Update webhooks to use command instead of EXECUTIONS_PROCESS
         for i in $(seq 1 $current_webhooks); do
-            sed -i "/n8n-webhook-$i:/,/volumes:/ {
-                /hostname:/a\    environment:\n      - EXECUTIONS_MODE=\${EXECUTIONS_MODE}\n      - QUEUE_BULL_REDIS_HOST=\${QUEUE_BULL_REDIS_HOST}\n      - QUEUE_BULL_REDIS_PORT=\${QUEUE_BULL_REDIS_PORT}\n      - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}\n      - N8N_DISABLE_UI=true\n      - N8N_DISABLE_EDITOR=true\n      - EXECUTIONS_PROCESS=webhook
+            sed -i "/n8n-webhook-$i:/,/restart: unless-stopped/ {
+                /EXECUTIONS_PROCESS=webhook/d
+                /N8N_DISABLE_UI=true/d
+                /N8N_DISABLE_EDITOR=true/d
             }" docker-compose.yml
+            
+            # Add command: webhook if not present
+            if ! grep -A 5 "n8n-webhook-$i:" docker-compose.yml | grep -q "command: webhook"; then
+                sed -i "/n8n-webhook-$i:/a\\    command: webhook" docker-compose.yml
+            fi
         done
         
-        push_fix_to_git "Fixed worker/webhook configuration to use environment variables"
+        push_fix_to_git "Updated to command-based worker/webhook configuration"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to fix binary data directory
+fix_binary_data_directory() {
+    print_message $YELLOW "🔧 Fixing binary data directory..."
+    
+    cd "$INSTALL_DIR/self-hosted-ai-starter-kit"
+    
+    # Create binary data directory if it doesn't exist
+    if ! docker exec n8n-main test -d /data/shared/binary-data 2>/dev/null; then
+        print_message $YELLOW "Creating missing binary data directory..."
+        
+        docker exec n8n-main mkdir -p /data/shared/binary-data 2>/dev/null || true
+        docker exec n8n-main chown -R node:node /data/shared/binary-data 2>/dev/null || true
+        docker exec n8n-main chmod -R 755 /data/shared/binary-data 2>/dev/null || true
+        
+        push_fix_to_git "Created missing binary data directory"
         return 0
     fi
     
@@ -331,6 +362,9 @@ fix_container_restarts() {
         
         # Fix Caddy ports if needed
         fix_caddy_ports
+        
+        # Fix binary data directory
+        fix_binary_data_directory
     fi
 }
 
@@ -351,6 +385,7 @@ handle_error() {
             fix_caddy_ports
             fix_postgres_password
             fix_encryption_key
+            fix_binary_data_directory
             ;;
         *)
             print_message $YELLOW "General error. Checking system state..."
@@ -633,9 +668,10 @@ print_section "Worker and Webhook Configuration"
 
 # Get number of workers
 while true; do
-    read -p "How many worker nodes do you want? (1-10) [4]: " WORKER_COUNT
-    WORKER_COUNT=${WORKER_COUNT:-4}
-    if [[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] && [ "$WORKER_COUNT" -ge 1 ] && [ "$WORKER_COUNT" -le 10 ]; then
+    read -p "How many worker nodes do you want? (1-10) [$WORKER_COUNT]: " NEW_WORKER_COUNT
+    NEW_WORKER_COUNT=${NEW_WORKER_COUNT:-$WORKER_COUNT}
+    if [[ "$NEW_WORKER_COUNT" =~ ^[0-9]+$ ]] && [ "$NEW_WORKER_COUNT" -ge 1 ] && [ "$NEW_WORKER_COUNT" -le 10 ]; then
+        WORKER_COUNT=$NEW_WORKER_COUNT
         print_message $GREEN "✅ Setting up $WORKER_COUNT worker nodes"
         break
     else
@@ -645,9 +681,10 @@ done
 
 # Get number of webhooks
 while true; do
-    read -p "How many webhook nodes do you want? (1-10) [4]: " WEBHOOK_COUNT
-    WEBHOOK_COUNT=${WEBHOOK_COUNT:-4}
-    if [[ "$WEBHOOK_COUNT" =~ ^[0-9]+$ ]] && [ "$WEBHOOK_COUNT" -ge 1 ] && [ "$WEBHOOK_COUNT" -le 10 ]; then
+    read -p "How many webhook nodes do you want? (1-10) [$WEBHOOK_COUNT]: " NEW_WEBHOOK_COUNT
+    NEW_WEBHOOK_COUNT=${NEW_WEBHOOK_COUNT:-$WEBHOOK_COUNT}
+    if [[ "$NEW_WEBHOOK_COUNT" =~ ^[0-9]+$ ]] && [ "$NEW_WEBHOOK_COUNT" -ge 1 ] && [ "$NEW_WEBHOOK_COUNT" -le 10 ]; then
+        WEBHOOK_COUNT=$NEW_WEBHOOK_COUNT
         print_message $GREEN "✅ Setting up $WEBHOOK_COUNT webhook nodes"
         break
     else
@@ -752,13 +789,11 @@ REDIS_PASSWORD=${REDIS_PASSWORD}
 # N8N Configuration
 N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
 N8N_USER_MANAGEMENT_JWT_SECRET=${N8N_JWT_SECRET}
-N8N_DEFAULT_BINARY_DATA_MODE=filesystem
 N8N_BASIC_AUTH_ACTIVE=true
 N8N_BASIC_AUTH_USER=${N8N_ADMIN_EMAIL}
 N8N_BASIC_AUTH_PASSWORD=${N8N_ADMIN_PASSWORD}
 N8N_RUNNERS_ENABLED=true
 N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
-OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
 
 # Domain Configuration
 DOMAIN=${DOMAIN}
@@ -773,10 +808,6 @@ QUEUE_HEALTH_CHECK_ACTIVE=true
 
 # Worker Configuration
 N8N_CONCURRENCY=10
-OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
-
-# Task Runners Configuration
-N8N_RUNNERS_ENABLED=true
 
 # Webhook and URL Configuration
 N8N_EDITOR_BASE_URL=https://${DOMAIN}
@@ -785,8 +816,29 @@ N8N_HOST=${DOMAIN}
 N8N_PROTOCOL=https
 N8N_PORT=443
 
+# Binary Data Configuration (Fixed for Cluster)
+N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+N8N_BINARY_DATA_BASE_PATH=/data/shared/binary-data
+N8N_BINARY_DATA_SIZE_LIMIT=50000000
+N8N_PAYLOAD_SIZE_MAX=100000000
+N8N_MAX_BODY_SIZE=100MB
+N8N_FILE_STORE_MODE=filesystem
+
+# Image Preview Configuration
+N8N_DISABLE_STATIC_BINARY_DATA_IMAGES=false
+N8N_STATIC_CACHE_BINARY_DATA_TTL=86400000
+N8N_SECURITY_AUDIT_DAYS=0
+N8N_CORS_ORIGIN=*
+
 # GPU Profile
 GPU_PROFILE=${GPU_PROFILE}
+
+# Database type configuration
+DB_TYPE=postgresdb
+DB_POSTGRESDB_HOST=postgres
+DB_POSTGRESDB_USER=n8n
+DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+DB_POSTGRESDB_DATABASE=n8n
 EOF
 
 # Create Caddyfile
@@ -816,7 +868,7 @@ ${DOMAIN} {
         header Upgrade websocket
     }
     
-    # Reverse proxy to main n8n instance (port 443 since N8N_PORT=443)
+    # API and WebSocket to main instance
     reverse_proxy @api n8n-main:443
     reverse_proxy @websocket n8n-main:443
     
@@ -890,7 +942,7 @@ services:
     volumes:
       - postgres_storage:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U n8n -d n8n"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-n8n} -d ${POSTGRES_DB:-n8n}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -901,13 +953,11 @@ services:
     container_name: redis
     networks: ['n8n-network']
     restart: unless-stopped
-    env_file:
-      - .env
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password}
     volumes:
       - redis_storage:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "--raw", "-a", "${REDIS_PASSWORD:-redis_password}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -922,9 +972,23 @@ services:
       - "5678:443"
     volumes:
       - n8n_storage:/home/node/.n8n
-      - ./shared:/data/shared
+      - shared_data:/data/shared
     env_file:
       - .env
+    environment:
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      # Binary data configuration
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_BINARY_DATA_BASE_PATH=/data/shared/binary-data
+      # Image preview configuration
+      - N8N_DISABLE_STATIC_BINARY_DATA_IMAGES=false
+      - N8N_STATIC_CACHE_BINARY_DATA_TTL=86400000
+      - N8N_SECURITY_AUDIT_DAYS=0
+      - N8N_CORS_ORIGIN=*
     depends_on:
       postgres:
         condition: service_healthy
@@ -934,24 +998,31 @@ services:
 
 DOCKERCOMPOSE_EOF
 
-# Add worker nodes using loop
+# Add worker nodes using loop with current command-based structure
 print_message $YELLOW "📝 Adding $WORKER_COUNT worker nodes..."
 for i in $(seq 1 $WORKER_COUNT); do
     cat >> docker-compose.yml << EOF
   # N8N Worker Node $i
   n8n-worker-$i:
     image: n8nio/n8n:latest
+    command: worker
     container_name: n8n-worker-$i
     hostname: n8n-worker-$i
     networks: ['n8n-network']
     volumes:
-      - ./shared:/data/shared
+      - shared_data:/data/shared
     env_file:
       - .env
     environment:
-      - EXECUTIONS_PROCESS=worker
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
+      - N8N_RUNNERS_MODE=queue
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      # Binary data configuration
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_BINARY_DATA_BASE_PATH=/data/shared/binary-data
     depends_on:
       postgres:
         condition: service_healthy
@@ -962,24 +1033,31 @@ for i in $(seq 1 $WORKER_COUNT); do
 EOF
 done
 
-# Add webhook nodes using loop
+# Add webhook nodes using loop with current command-based structure
 print_message $YELLOW "📝 Adding $WEBHOOK_COUNT webhook nodes..."
 for i in $(seq 1 $WEBHOOK_COUNT); do
     cat >> docker-compose.yml << EOF
   # N8N Webhook Processor Node $i
   n8n-webhook-$i:
     image: n8nio/n8n:latest
+    command: webhook
     container_name: n8n-webhook-$i
     hostname: n8n-webhook-$i
     networks: ['n8n-network']
     volumes:
-      - ./shared:/data/shared
+      - shared_data:/data/shared
     env_file:
       - .env
     environment:
-      - EXECUTIONS_PROCESS=webhook
-      - N8N_DISABLE_UI=true
-      - N8N_DISABLE_EDITOR=true
+      - N8N_RUNNERS_MODE=webhook
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      # Binary data configuration
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_BINARY_DATA_BASE_PATH=/data/shared/binary-data
     depends_on:
       postgres:
         condition: service_healthy
@@ -990,8 +1068,8 @@ for i in $(seq 1 $WEBHOOK_COUNT); do
 EOF
 done
 
-# Add Ollama and remaining services
-cat >> docker-compose.yml << 'DOCKERCOMPOSE_END_EOF'
+# Add Ollama and remaining services with proper GPU profile support
+cat >> docker-compose.yml << 'DOCKERCOMPOSE_OLLAMA_EOF'
   # Ollama AI Model Server
   ollama:
     image: ollama/ollama:latest
@@ -1004,11 +1082,11 @@ cat >> docker-compose.yml << 'DOCKERCOMPOSE_END_EOF'
       - ollama_storage:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
-DOCKERCOMPOSE_END_EOF
+DOCKERCOMPOSE_OLLAMA_EOF
 
 # Add GPU configuration only if GPU is selected
 if [ "$GPU_PROFILE" = "gpu-nvidia" ]; then
-    cat >> docker-compose.yml << 'GPU_CONFIG_EOF'
+    cat >> docker-compose.yml << 'GPU_NVIDIA_EOF'
     deploy:
       resources:
         reservations:
@@ -1018,16 +1096,22 @@ if [ "$GPU_PROFILE" = "gpu-nvidia" ]; then
               capabilities: [gpu]
         limits:
           memory: 4G
-GPU_CONFIG_EOF
+    profiles: ['gpu-nvidia']
+GPU_NVIDIA_EOF
 elif [ "$GPU_PROFILE" = "gpu-amd" ]; then
-    cat >> docker-compose.yml << 'GPU_CONFIG_EOF'
+    cat >> docker-compose.yml << 'GPU_AMD_EOF'
     devices:
       - /dev/kfd
       - /dev/dri
     group_add:
       - video
       - render
-GPU_CONFIG_EOF
+    profiles: ['gpu-amd']
+GPU_AMD_EOF
+else
+    cat >> docker-compose.yml << 'CPU_PROFILE_EOF'
+    profiles: ['cpu']
+CPU_PROFILE_EOF
 fi
 
 # Continue with the rest of docker-compose.yml
@@ -1048,6 +1132,7 @@ cat >> docker-compose.yml << 'DOCKERCOMPOSE_FINAL_EOF'
       - "sleep 10 && ollama pull llama3.2 && ollama pull nomic-embed-text"
     depends_on:
       - ollama
+    profiles: ['cpu', 'gpu-nvidia', 'gpu-amd']
 
   # Qdrant Vector Database
   qdrant:
@@ -1062,6 +1147,7 @@ cat >> docker-compose.yml << 'DOCKERCOMPOSE_FINAL_EOF'
 
 volumes:
   n8n_storage:
+  shared_data:
   postgres_storage:
   redis_storage:
   ollama_storage:
@@ -1073,17 +1159,6 @@ networks:
   n8n-network:
     driver: bridge
 DOCKERCOMPOSE_FINAL_EOF
-
-# Also need to add DB configuration to .env
-cat >> .env << EOF
-
-# Database type configuration
-DB_TYPE=postgresdb
-DB_POSTGRESDB_HOST=postgres
-DB_POSTGRESDB_USER=n8n
-DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-DB_POSTGRESDB_DATABASE=n8n
-EOF
 
 # Create startup script
 print_message $YELLOW "📝 Creating startup script..."
@@ -1108,6 +1183,9 @@ wait_for_service() {
     return 1
 }
 
+# Get GPU profile from .env
+GPU_PROFILE=$(grep "^GPU_PROFILE=" .env | cut -d'=' -f2)
+
 # Start base services first
 docker compose up -d postgres redis
 
@@ -1117,8 +1195,14 @@ until docker exec postgres pg_isready -U n8n >/dev/null 2>&1; do
     sleep 1
 done
 
-# Start remaining services
-docker compose up -d
+# Start services with appropriate profile
+if [ "$GPU_PROFILE" != "cpu" ]; then
+    echo "Starting with GPU profile: $GPU_PROFILE"
+    docker compose --profile "$GPU_PROFILE" up -d
+else
+    echo "Starting with CPU profile"
+    docker compose --profile cpu up -d
+fi
 
 # Verify critical services
 for service in postgres redis n8n-main caddy; do
@@ -1129,6 +1213,11 @@ for service in postgres redis n8n-main caddy; do
         exit 1
     fi
 done
+
+# Create binary data directory if it doesn't exist
+docker exec n8n-main mkdir -p /data/shared/binary-data 2>/dev/null || true
+docker exec n8n-main chown -R node:node /data/shared/binary-data 2>/dev/null || true
+docker exec n8n-main chmod -R 755 /data/shared/binary-data 2>/dev/null || true
 
 echo "All services started successfully"
 STARTUP_EOF
@@ -1219,6 +1308,18 @@ else
     echo "[$(date)] PostgreSQL backup failed!" >> $LOG_FILE
 fi
 
+# Backup shared data (binary files)
+docker run --rm -v self-hosted-ai-starter-kit_shared_data:/data -v $BACKUP_DIR:/backup alpine tar czf /backup/shared-data-backup-$DATE.tar.gz /data 2>> $LOG_FILE
+
+if [ $? -eq 0 ]; then
+    echo "[$(date)] Shared data backup completed: shared-data-backup-$DATE.tar.gz" >> $LOG_FILE
+    
+    # Keep only last 7 shared data backups
+    ls -t $BACKUP_DIR/shared-data-backup-*.tar.gz | tail -n +8 | xargs -r rm
+else
+    echo "[$(date)] Shared data backup failed!" >> $LOG_FILE
+fi
+
 # Backup configurations
 CONFIG_BACKUP_DIR="$BACKUP_DIR/configs-$DATE"
 mkdir -p "$CONFIG_BACKUP_DIR"
@@ -1263,6 +1364,7 @@ if [ -f "$INSTALL_DIR/.github-token.enc" ] && [ -f "$INSTALL_DIR/.github-repo" ]
         # Copy backups
         cp "$BACKUP_DIR/n8n-backup-$DATE.tar.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
         cp "$BACKUP_DIR/postgres-backup-$DATE.sql.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
+        cp "$BACKUP_DIR/shared-data-backup-$DATE.tar.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
         cp "$BACKUP_DIR/configs-backup-$DATE.tar.gz" "$(hostname)/$(date +%Y-%m)/" 2>/dev/null
         
         # Create backup manifest
@@ -1277,6 +1379,7 @@ Webhook Count: $(docker ps --filter "name=n8n-webhook" -q | wc -l)
 Files:
 - n8n-backup-$DATE.tar.gz
 - postgres-backup-$DATE.sql.gz
+- shared-data-backup-$DATE.tar.gz
 - configs-backup-$DATE.tar.gz
 MANIFEST
         
@@ -1390,6 +1493,7 @@ fi
 
 N8N_BACKUP="$BACKUP_DIR/n8n-backup-$BACKUP_DATE.tar.gz"
 PG_BACKUP="$BACKUP_DIR/postgres-backup-$BACKUP_DATE.sql.gz"
+SHARED_BACKUP="$BACKUP_DIR/shared-data-backup-$BACKUP_DATE.tar.gz"
 
 if [ ! -f "$N8N_BACKUP" ]; then
     echo "Error: Backup file $N8N_BACKUP not found!"
@@ -1411,6 +1515,12 @@ docker compose stop $(docker compose ps --services | grep -E "n8n-main|n8n-worke
 # Restore n8n data
 echo "Restoring n8n data..."
 docker run --rm -v self-hosted-ai-starter-kit_n8n_storage:/data -v $BACKUP_DIR:/backup alpine sh -c "rm -rf /data/* && tar xzf /backup/n8n-backup-$BACKUP_DATE.tar.gz -C /"
+
+# Restore shared data if backup exists
+if [ -f "$SHARED_BACKUP" ]; then
+    echo "Restoring shared data..."
+    docker run --rm -v self-hosted-ai-starter-kit_shared_data:/data -v $BACKUP_DIR:/backup alpine sh -c "rm -rf /data/* && tar xzf /backup/shared-data-backup-$BACKUP_DATE.tar.gz -C /"
+fi
 
 # Restore PostgreSQL if backup exists
 if [ -f "$PG_BACKUP" ]; then
@@ -1441,6 +1551,12 @@ fi
 echo "Starting services..."
 docker compose up -d
 
+# Recreate binary data directory with proper permissions
+sleep 10
+docker exec n8n-main mkdir -p /data/shared/binary-data 2>/dev/null || true
+docker exec n8n-main chown -R node:node /data/shared/binary-data 2>/dev/null || true
+docker exec n8n-main chmod -R 755 /data/shared/binary-data 2>/dev/null || true
+
 echo "Restore completed!"
 echo "Please wait a few moments for all services to start."
 RESTORE_EOF
@@ -1450,16 +1566,6 @@ chmod +x $INSTALL_DIR/restore-n8n.sh
 # Add to cron for daily backups at 2 AM
 print_message $YELLOW "📅 Setting up daily automatic backups..."
 (crontab -l 2>/dev/null | grep -v "backup-n8n.sh"; echo "0 2 * * * $INSTALL_DIR/backup-n8n.sh") | crontab -
-
-# Run initial backup
-print_message $YELLOW "💾 Running initial backup..."
-$INSTALL_DIR/backup-n8n.sh
-
-print_message $GREEN "✅ Backup system configured!"
-print_message $BLUE "   Backups run daily at 2 AM"
-print_message $BLUE "   Backup location: $INSTALL_DIR/backups"
-print_message $BLUE "   Manual backup: $INSTALL_DIR/backup-n8n.sh"
-print_message $BLUE "   Restore backup: $INSTALL_DIR/restore-n8n.sh <date>"
 
 # Configure firewall
 print_section "Configuring Firewall"
@@ -1494,23 +1600,44 @@ systemctl daemon-reload
 systemctl enable onezipp-n8n.service
 cd $INSTALL_DIR/self-hosted-ai-starter-kit
 
-# Start services with error handling
-if ! docker compose up -d; then
-    print_message $RED "❌ Initial startup failed. Attempting fixes..."
-    fix_gpu_config
-    fix_webhook_urls
-    fix_caddy_ports
-    docker compose up -d
+# Start services with GPU profile support
+if [ "$GPU_PROFILE" != "cpu" ]; then
+    print_message $YELLOW "Starting services with GPU profile: $GPU_PROFILE"
+    if ! docker compose --profile "$GPU_PROFILE" up -d; then
+        print_message $RED "❌ Initial startup failed. Attempting fixes..."
+        fix_gpu_config
+        fix_webhook_urls
+        fix_caddy_ports
+        fix_binary_data_directory
+        docker compose --profile "$GPU_PROFILE" up -d
+    fi
+else
+    print_message $YELLOW "Starting services with CPU profile"
+    if ! docker compose --profile cpu up -d; then
+        print_message $RED "❌ Initial startup failed. Attempting fixes..."
+        fix_gpu_config
+        fix_webhook_urls
+        fix_caddy_ports
+        fix_binary_data_directory
+        docker compose --profile cpu up -d
+    fi
 fi
 
 # Wait for services to be ready
 print_message $YELLOW "⏳ Waiting for services to start..."
 sleep 45
 
+# Create binary data directory and set permissions
+print_message $YELLOW "🗂️  Setting up binary data directory..."
+docker exec n8n-main mkdir -p /data/shared/binary-data 2>/dev/null || true
+docker exec n8n-main chown -R node:node /data/shared/binary-data 2>/dev/null || true
+docker exec n8n-main chmod -R 755 /data/shared/binary-data 2>/dev/null || true
+
 # Check for issues and auto-fix
 fix_container_restarts
 fix_webhook_urls
 fix_caddy_ports
+fix_binary_data_directory
 
 # Check service status
 print_section "Service Status Check"
@@ -1542,11 +1669,21 @@ for service in "${ALL_SERVICES[@]}"; do
     fi
 done
 
+# Verify binary data directory
+print_message $YELLOW "🔍 Verifying binary data setup..."
+if docker exec n8n-main test -d /data/shared/binary-data; then
+    print_message $GREEN "✅ Binary data directory exists"
+    docker exec n8n-main ls -la /data/shared/binary-data/ || print_message $YELLOW "Directory is empty (normal for new installation)"
+else
+    print_message $RED "❌ Binary data directory missing - creating now..."
+    fix_binary_data_directory
+fi
+
 # Save configuration summary
 print_section "Saving Configuration"
 cat > $INSTALL_DIR/config-summary.txt << EOF
-Onezipp N8N Cluster Configuration Summary
-=========================================
+Onezipp N8N Cluster Configuration Summary v2.1
+==============================================
 Installation Date: $(date)
 Installation Directory: $INSTALL_DIR
 
@@ -1564,6 +1701,11 @@ N8N JWT Secret: ${N8N_JWT_SECRET}
 GPU Profile: ${GPU_PROFILE}
 Worker Nodes: ${WORKER_COUNT}
 Webhook Nodes: ${WEBHOOK_COUNT}
+
+Binary Data Configuration: FIXED
+- Shared storage: /data/shared/binary-data
+- Image preview: ENABLED
+- Volume mapping: shared_data for binary files, n8n_storage for main instance only
 
 Service URLs:
 - N8N UI: https://${DOMAIN}
@@ -1592,6 +1734,16 @@ if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
 EOF
 fi
 
+# Run initial backup
+print_message $YELLOW "💾 Running initial backup..."
+$INSTALL_DIR/backup-n8n.sh
+
+print_message $GREEN "✅ Backup system configured!"
+print_message $BLUE "   Backups run daily at 2 AM"
+print_message $BLUE "   Backup location: $INSTALL_DIR/backups"
+print_message $BLUE "   Manual backup: $INSTALL_DIR/backup-n8n.sh"
+print_message $BLUE "   Restore backup: $INSTALL_DIR/restore-n8n.sh <date>"
+
 # Final check and push any fixes
 if docker ps | grep -E "n8n-" | grep -q "Restarting"; then
     print_message $YELLOW "⚠️  Some services are still restarting. Running final fixes..."
@@ -1603,15 +1755,16 @@ fix_webhook_urls
 fix_caddy_ports
 fix_encryption_key
 fix_postgres_password
+fix_binary_data_directory
 
 # Push final state to git
-push_fix_to_git "Installation completed with all fixes applied"
+push_fix_to_git "Installation completed with all fixes applied including binary data sharing"
 
 # Final output
 SUMMARY_SHOWN=1
 print_section "🎉 Installation Complete!"
 echo ""
-print_message $GREEN "✅ Onezipp N8N Cluster has been successfully installed!"
+print_message $GREEN "✅ Onezipp N8N Cluster v2.1 has been successfully installed!"
 echo ""
 echo -e "${YELLOW}📋 Access Information:${NC}"
 echo -e "   N8N UI: ${GREEN}https://${DOMAIN}${NC}"
@@ -1649,8 +1802,10 @@ echo -e "   • ${WEBHOOK_COUNT} Webhook processor nodes"
 echo -e "   • Redis for queue management"
 echo -e "   • PostgreSQL database"
 echo -e "   • Caddy with automatic SSL"
-echo -e "   • Ollama for AI models"
+echo -e "   • Ollama for AI models (${GPU_PROFILE} profile)"
 echo -e "   • Qdrant vector database"
+echo -e "   • ✅ Fixed binary data sharing across cluster"
+echo -e "   • ✅ Image preview enabled"
 echo -e "   • Automatic daily backups at 2 AM"
 if [[ "$ENABLE_GITHUB_BACKUP" =~ ^[Yy]$ ]]; then
     echo -e "   • GitHub backup integration"
@@ -1660,10 +1815,13 @@ print_message $YELLOW "⚠️  Note: It may take a few minutes for SSL certifica
 print_message $YELLOW "   If you can't access the site immediately, please wait 2-3 minutes."
 print_message $YELLOW "   Webhooks will automatically use: https://${DOMAIN}/webhook/..."
 echo ""
+print_message $BLUE "🖼️  Image Preview: Upload images in N8N and you should see thumbnails!"
+print_message $BLUE "   Binary data is now properly shared across all cluster nodes."
+echo ""
 print_message $BLUE "💾 Important: Your workflows are automatically backed up daily at 2 AM"
 print_message $BLUE "   You can also run manual backups anytime with: $INSTALL_DIR/backup-n8n.sh"
 echo ""
-print_message $GREEN "🎊 Thank you for using Onezipp N8N Cluster Script!"
+print_message $GREEN "🎊 Thank you for using Onezipp N8N Cluster Script v2.1!"
 print_message $BLUE "   GitHub: https://github.com/PratikMoitra/onezipp-n8n-cluster"
 print_message $BLUE "   Auto-fix enabled: Errors are automatically fixed and pushed to git"
 print_message $YELLOW "   💡 Tip: Fork the repo and update GIT_REMOTE in the script to use your own repository!"
